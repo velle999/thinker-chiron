@@ -1,6 +1,7 @@
 
 #include "main.h"
 #include "lib/ini.h"
+#include "chiron.h"
 
 FILE* debug_log = NULL;
 Config conf;
@@ -447,6 +448,9 @@ DLL_EXPORT BOOL APIENTRY DllMain(HINSTANCE UNUSED(hinstDLL), DWORD fdwReason, LP
     size_t seed;
     switch (fdwReason) {
         case DLL_PROCESS_ATTACH:
+            // First statement in the process's life that is ours. If
+            // chiron_trace.txt is empty or missing, thinker.dll never loaded.
+            chiron_trace("dllmain: attach\n");
             if (DEBUG && !(debug_log = fopen("debug.txt", "w"))) {
                 MessageBoxA(0, "Error while opening debug.txt file.",
                     MOD_VERSION, MB_OK | MB_ICONSTOP);
@@ -463,11 +467,15 @@ DLL_EXPORT BOOL APIENTRY DllMain(HINSTANCE UNUSED(hinstDLL), DWORD fdwReason, LP
                     MOD_VERSION, MB_OK | MB_ICONSTOP);
                 exit_fail();
             }
+            chiron_trace("dllmain: thinker.ini parsed\n");
             if (!cmd_parse(&conf) || !patch_setup(&conf)) {
+                chiron_trace("dllmain: cmd_parse/patch_setup FAILED\n");
                 MessageBoxA(0, "Error while loading the game.",
                     MOD_VERSION, MB_OK | MB_ICONSTOP);
                 exit_fail();
             }
+            chiron_trace("dllmain: patch_setup ok, video_mode=%d %dx%d\n",
+                conf.video_mode, conf.window_width, conf.window_height);
             *EngineVersion = MOD_VERSION;
             *EngineDate = MOD_DATE;
             seed = GetTickCount();

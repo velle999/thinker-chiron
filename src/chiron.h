@@ -39,6 +39,21 @@ it -- which left the game unable to allocate its draw buffer, long after this
 code had finished. Everything below is safe to call from normal game context.
 */
 
+/*
+Unconditional breadcrumb log, written to chiron_trace.txt in the game folder.
+
+Separate from the chiron.txt debug log on purpose. chiron.txt only appears once
+chiron.ini has been found and parsed and debug=1 read out of it, so its absence
+is ambiguous -- it cannot distinguish "the DLL never loaded" from "the game died
+before the first text lookup" from "the config was not found". This one is plain
+fopen/fputs/fclose with no configuration behind it, so the last line it contains
+is exactly how far the process got.
+
+Safe to call from DllMain: it touches only msvcrt, which is already resident as a
+static import, and never loads a DLL. Delete the file to reset it.
+*/
+void chiron_trace(const char* fmt, ...);
+
 // Records who is speaking to whom; called from mod_diplomacy_caption.
 void chiron_set_speakers(int faction1, int faction2);
 

@@ -79,6 +79,24 @@ static int listener_faction = -1;  // who it is talking to (usually the player)
 
 static void chiron_ensure_init();
 
+void chiron_trace(const char* fmt, ...) {
+    // Bounded so a hot path cannot fill the disk if a trace call is left in.
+    static int lines = 0;
+    if (lines >= 500) {
+        return;
+    }
+    lines++;
+    FILE* f = fopen("chiron_trace.txt", lines == 1 ? "w" : "a");
+    if (!f) {
+        return;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fclose(f);
+}
+
 static void ch_log(const char* fmt, ...) {
     if (!chiron_conf.debug || !chiron_log) {
         return;
@@ -250,6 +268,12 @@ void chiron_set_speakers(int faction1, int faction2) {
 }
 
 bool chiron_should_rewrite(const char* filename, const char* label) {
+    static bool first = true;
+    if (first) {
+        first = false;
+        chiron_trace("text_open: first lookup reached (%s / %s)\n",
+            filename ? filename : "(null)", label ? label : "(null)");
+    }
     chiron_ensure_init();
     if (!chiron_conf.enabled || !filename || !label) {
         return false;
@@ -265,6 +289,7 @@ bool chiron_should_rewrite(const char* filename, const char* label) {
     for (auto& prefix : DiplomacyLabels) {
         size_t n = strlen(prefix);
         if (!_strnicmp(label, prefix, n)) {
+            chiron_trace("hook: rewriting %s (speaker=%d)\n", label, speaker_faction);
             return true;
         }
     }
@@ -792,8 +817,13 @@ static void chiron_ensure_init() {
         chiron_log = fopen("chiron.txt", "w");
     }
 
+    chiron_trace("init: enabled=%d %s:%d timeout=%dms debug=%d\n",
+        chiron_conf.enabled, chiron_conf.host, chiron_conf.port,
+        chiron_conf.timeout_ms, chiron_conf.debug);
+
     WSADATA wsa;
     winsock_ready = load_winsock() && ws.WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+    chiron_trace("init: winsock_ready=%d\n", (int)winsock_ready);
     ch_log("chiron_init: enabled=%d %s:%d timeout=%dms winsock=%d\n",
         chiron_conf.enabled, chiron_conf.host, chiron_conf.port,
         chiron_conf.timeout_ms, (int)winsock_ready);
