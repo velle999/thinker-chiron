@@ -20,8 +20,10 @@ a dead bridge, an empty reply: all of them mean "show what the game shipped".
 
 struct ChironConfig {
     int  enabled;           // master switch
-    int  port;              // chiron-bridge port on the host
+    int  port;              // 0 until resolved from the backend's default
     char host[64];
+    char backend[16];       // bridge (default), ollama, or llamacpp
+    char model[64];         // ollama only: which model to ask for
     int  timeout_ms;        // give up and use vanilla text after this
     int  max_tokens;
     int  cache_size;        // generated blocks kept per session

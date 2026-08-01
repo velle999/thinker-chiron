@@ -973,12 +973,20 @@ static void json_escape(const char* src, char* dst, size_t dst_len) {
 Extracts the "text" field. The bridge controls this response shape, so a
 targeted scan beats linking a JSON parser into a 32-bit game DLL.
 */
-static bool json_get_text(const char* body, char* out, size_t out_len) {
-    const char* p = strstr(body, "\"text\"");
+static bool json_get_text(const char* body, const char* key,
+                          char* out, size_t out_len) {
+    char needle[32];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+    const char* p = strstr(body, needle);
     if (!p) {
         return false;
     }
-    p = strchr(p + 6, '"');
+    // Past the key, then past the colon, to the opening quote of the value.
+    p = strchr(p + strlen(needle), ':');
+    if (!p) {
+        return false;
+    }
+    p = strchr(p, '"');
     if (!p) {
         return false;
     }
@@ -1095,21 +1103,52 @@ static bool http_generate(const char* prompt, char* out, size_t out_len,
     nonblocking = 0;
     ws.ioctlsocket(sock, FIONBIO, &nonblocking);
 
+    /*
+    Talk to chiron-bridge, or straight to a model server.
+
+    The bridge is worth having where it can be a service -- it walks three
+    backends, restarts synapd when a game stops it, and reports which of them
+    were down. But it is one more thing that has to be running, and on Windows
+    there is no systemd to keep it up while ollama is already sitting there as a
+    startup service. Requiring it there would mean the mod silently shows vanilla
+    dialogue whenever the user forgot to launch a terminal.
+
+    Only three things actually differ between them: the path, the shape of the
+    request body, and the key holding the reply. llama.cpp's OpenAI-compatible
+    endpoint even uses "text" like the bridge does, so it needs no new parsing
+    at all.
+    */
+    const bool to_ollama   = !_stricmp(chiron_conf.backend, "ollama");
+    const bool to_llamacpp = !_stricmp(chiron_conf.backend, "llamacpp");
+    const char* path =
+        to_ollama   ? "/api/generate" :
+        to_llamacpp ? "/v1/completions" : "/generate";
+    const char* reply_key = to_ollama ? "response" : "text";
+
     // Body first so we can set an accurate Content-Length.
     static char esc[16384];
     static char body[16600];
     static char req[20000];
     json_escape(prompt, esc, sizeof(esc));
-    int body_len = snprintf(body, sizeof(body),
-        "{\"prompt\":\"%s\",\"max_tokens\":%d}", esc, max_tokens);
+    int body_len;
+    if (to_ollama) {
+        // stream:false or the reply arrives as one JSON object per token.
+        body_len = snprintf(body, sizeof(body),
+            "{\"model\":\"%s\",\"prompt\":\"%s\",\"stream\":false,"
+            "\"options\":{\"num_predict\":%d}}",
+            chiron_conf.model, esc, max_tokens);
+    } else {
+        body_len = snprintf(body, sizeof(body),
+            "{\"prompt\":\"%s\",\"max_tokens\":%d}", esc, max_tokens);
+    }
 
     int req_len = snprintf(req, sizeof(req),
-        "POST /generate HTTP/1.1\r\n"
+        "POST %s HTTP/1.1\r\n"
         "Host: %s:%d\r\n"
         "Content-Type: application/json\r\n"
         "Content-Length: %d\r\n"
         "Connection: close\r\n\r\n%s",
-        chiron_conf.host, chiron_conf.port, body_len, body);
+        path, chiron_conf.host, chiron_conf.port, body_len, body);
 
     chiron_trace("http: sending %d bytes\n", req_len);
     if (ws.send(sock, req, req_len, 0) != req_len) {
@@ -1145,7 +1184,7 @@ static bool http_generate(const char* prompt, char* out, size_t out_len,
         ch_log("http: non-200 response: %.80s\n", resp);
         return false;
     }
-    return json_get_text(hdr_end + 4, out, out_len);
+    return json_get_text(hdr_end + 4, reply_key, out, out_len);
 }
 
 // ── prompt construction (port of buildDiplomacyPrompt) ─────────────────────
@@ -2536,7 +2575,10 @@ static void chiron_ensure_init() {
     chiron_ready = true;
 
     chiron_conf.enabled = 1;
-    chiron_conf.port = 11436;
+    // 0 means "not set in the ini", resolved against the backend below.
+    chiron_conf.port = 0;
+    strcpy_n(chiron_conf.backend, sizeof(chiron_conf.backend), "bridge");
+    strcpy_n(chiron_conf.model, sizeof(chiron_conf.model), "llama3.2");
     strcpy_n(chiron_conf.host, sizeof(chiron_conf.host), "127.0.0.1");
     chiron_conf.timeout_ms = 8000;
     /*
@@ -2564,6 +2606,8 @@ static void chiron_ensure_init() {
             char* val = strtrim(eq + 1);
             if (!_stricmp(key, "enabled"))          chiron_conf.enabled = atoi(val);
             else if (!_stricmp(key, "port"))        chiron_conf.port = atoi(val);
+            else if (!_stricmp(key, "backend"))     strcpy_n(chiron_conf.backend, sizeof(chiron_conf.backend), val);
+            else if (!_stricmp(key, "model"))       strcpy_n(chiron_conf.model, sizeof(chiron_conf.model), val);
             else if (!_stricmp(key, "host"))        strcpy_n(chiron_conf.host, sizeof(chiron_conf.host), val);
             else if (!_stricmp(key, "timeout_ms"))  chiron_conf.timeout_ms = atoi(val);
             else if (!_stricmp(key, "max_tokens"))  chiron_conf.max_tokens = atoi(val);
@@ -2572,6 +2616,17 @@ static void chiron_ensure_init() {
             else if (!_stricmp(key, "debug"))       chiron_conf.debug = atoi(val);
         }
         fclose(f);
+    }
+
+    /*
+    Each backend listens somewhere different, and making the user remember that
+    is a way to have the mod look broken. Only fall back to the default when the
+    ini did not say.
+    */
+    if (!chiron_conf.port) {
+        chiron_conf.port = !_stricmp(chiron_conf.backend, "ollama")   ? 11434
+                         : !_stricmp(chiron_conf.backend, "llamacpp") ? 8080
+                         : 11436;
     }
 
     if (chiron_conf.debug) {
@@ -2599,9 +2654,9 @@ static void chiron_ensure_init() {
     if (chiron_conf.enabled) {
         ensure_winsock();
     }
-    ch_log("chiron_init: enabled=%d %s:%d timeout=%dms winsock=%d\n",
-        chiron_conf.enabled, chiron_conf.host, chiron_conf.port,
-        chiron_conf.timeout_ms, (int)winsock_ready);
+    ch_log("chiron_init: enabled=%d backend=%s %s:%d timeout=%dms winsock=%d\n",
+        chiron_conf.enabled, chiron_conf.backend, chiron_conf.host,
+        chiron_conf.port, chiron_conf.timeout_ms, (int)winsock_ready);
 
 }
 
