@@ -145,6 +145,92 @@ int __cdecl text_open(const char* filename, const char* label) {
     return false;
 }
 
+/*
+Chiron Rising: pass-through hook on the ENGINE's text_open at 0x5FD550.
+
+Thinker's text_open above is a self-contained reimplementation writing into its
+own static TextBuffer -- it never touches the engine's text state at 0x9B7BA0.
+So replacing the engine's function with it does not work: the engine's own
+text_get/text_string keep reading 0x9B7BA0, which nothing has filled in, and the
+game dies on the first lookup. Only Thinker's own callers use it.
+
+Instead, call the original and then edit what it produced. 0x5FD550 is a thin
+wrapper whose first two instructions are position-independent:
+
+    8b 44 24 08   mov eax,[esp+8]     4 bytes
+    8b 4c 24 04   mov ecx,[esp+4]     4 bytes   <- 8-byte steal, instruction aligned
+    50 51         push eax; push ecx
+    b9 a0 7b 9b 00 mov ecx, 0x9B7BA0  the engine's Text
+    e8 ...        call <implementation>
+    c3            ret
+
+so an 8-byte trampoline plus a jump back to +8 reproduces it exactly. The tail
+"ret" returns straight to our caller, and the two stolen movs read the same
+[esp+4]/[esp+8] because we are entered by a normal cdecl call.
+
+Swapping *TextBufferFile (0x9B7CF4) rather than Thinker's Text.File is what
+makes this reach the game: that FILE* is the one the engine reads from. It is
+only safe because the DLL is built against msvcrt and shares a FILE layout with
+the engine -- see docs/toolchain.md.
+*/
+static const uint8_t TextOpenPrologue[] = {0x8b,0x44,0x24,0x08, 0x8b,0x4c,0x24,0x04};
+#define ENGINE_TEXT_OPEN 0x5FD550
+#define STOLEN_BYTES     ((int)sizeof(TextOpenPrologue))
+
+typedef int(__cdecl *Fengine_text_open)(const char*, const char*);
+static Fengine_text_open orig_text_open = NULL;
+
+static int __cdecl chiron_text_open(const char* filename, const char* label) {
+    int rc = orig_text_open(filename, label);
+    if (rc || !label) {
+        return rc; // engine could not find it; nothing to rewrite
+    }
+    const char* name = filename ? filename : TextBufferFileName;
+    if (chiron_should_rewrite(name, label)) {
+        FILE* cur = *TextBufferFile;
+        if (cur) {
+            if (FILE* gen = chiron_rewrite_block(cur, label)) {
+                fclose(cur);
+                *TextBufferFile = gen;
+            }
+        }
+    }
+    return rc;
+}
+
+bool chiron_install_text_hook() {
+    uint8_t* target = (uint8_t*)ENGINE_TEXT_OPEN;
+
+    // Refuse to patch anything but the prologue this was written against.
+    if (memcmp(target, TextOpenPrologue, STOLEN_BYTES)) {
+        chiron_trace("hook: text_open prologue mismatch, not hooking\n");
+        return false;
+    }
+    uint8_t* tramp = (uint8_t*)VirtualAlloc(
+        NULL, 32, MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tramp) {
+        chiron_trace("hook: trampoline alloc failed\n");
+        return false;
+    }
+    memcpy(tramp, target, STOLEN_BYTES);
+    tramp[STOLEN_BYTES] = 0xE9;
+    *(int32_t*)(tramp + STOLEN_BYTES + 1) =
+        (ENGINE_TEXT_OPEN + STOLEN_BYTES) - (int32_t)(tramp + STOLEN_BYTES) - 5;
+    orig_text_open = (Fengine_text_open)tramp;
+
+    DWORD prot = 0;
+    if (!VirtualProtect(target, 5, PAGE_EXECUTE_READWRITE, &prot)) {
+        chiron_trace("hook: VirtualProtect failed\n");
+        return false;
+    }
+    target[0] = 0xE9;
+    *(int32_t*)(target + 1) = (int32_t)chiron_text_open - ENGINE_TEXT_OPEN - 5;
+    VirtualProtect(target, 5, prot, &prot);
+
+    chiron_trace("hook: engine text_open redirected (trampoline %p)\n", (void*)tramp);
+    return true;
+}
+
 void __cdecl text_close() {
     if (Text.File) {
         fclose(Text.File);

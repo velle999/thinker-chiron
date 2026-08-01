@@ -457,10 +457,12 @@ bool patch_setup(Config* cf) {
     engine's own version does for itself. That is presumably why upstream
     declares these but has not wired them.
 
-    Intercepting engine dialogue needs a pass-through hook that calls the
-    original rather than replacing it, which means a trampoline for the
-    overwritten prologue. Left undone deliberately; see README.
+    Intercepting engine dialogue therefore needs a pass-through hook that calls
+    the original rather than replacing it. That lives in config.cpp, installs a
+    trampoline for the overwritten prologue, and edits the engine's own text
+    state afterwards. It no-ops safely if the prologue is not what it expects.
     */
+    chiron_install_text_hook();
 
     write_jump(0x421670, (int)has_fac);
     write_jump(0x4688E0, (int)MapWin_gen_overlays);

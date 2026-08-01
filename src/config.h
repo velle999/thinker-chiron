@@ -51,6 +51,9 @@ static_assert(DefaultRules == 0x1A0E, "");
 const char* alpha_file();
 FILE* env_open(const char* path, const char* mode);
 int __cdecl X_text_open(const char *filename, const char *label);
+
+// Chiron Rising: pass-through hook on the engine's text_open. Call once at startup.
+bool chiron_install_text_hook();
 int __cdecl text_open(const char* filename, const char* label);
 void __cdecl text_close();
 char* text_buf_ptr();
