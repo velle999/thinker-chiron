@@ -707,6 +707,7 @@ static bool is_cosmetic_token(const char* name) {
 // Small models like to announce what they are about to do before doing it.
 static void strip_preamble(char* text) {
     static const char* leads[] = {
+        "MESSAGE IN YOUR VOICE:",
         "REWRITTEN MESSAGE:", "REWRITTEN:", "MESSAGE:", "RESPONSE:", "ANSWER:",
         "Here is the rewritten message:", "Here's the rewritten message:",
     };
@@ -776,6 +777,167 @@ static void scrub_unknown_tokens(char* text, char tokens[][64], int token_count)
         }
     }
     text[k] = '\0';
+}
+
+/*
+Cut the reply down to one thing said once, in the shape the engine's own scripts
+are written in.
+
+The prompt asks for all of this, but synapd samples GREEDILY -- there is no
+temperature on its wire protocol and no repetition penalty anywhere in the path
+-- and greedy decoding on a 7B degenerates into a loop whenever it likes its own
+last sentence. Lal opened a Peacekeepers popup with the same commendation seven
+times over ("Lal, noble leader of the Peacekeepers, is commended." / "Lal,
+valiant champion of the Peacekeepers, is lauded." / ...) and ran straight into
+the token ceiling, so the box ended mid-word on "your unwavering stand for the
+rights". Prompt wording cannot be the only defence against that; sampling is not
+ours to fix, so the text gets trimmed after the fact.
+
+Three separate cuts, in order:
+
+1. Scaffolding. Anything from a bullet or an ALL-CAPS label onwards is the model
+   narrating the task rather than doing it, and everything after it is too.
+2. Repetition and length. Identical sentences are dropped and the reply stops at
+   CH_MAX_SENTENCES; a trailing fragment with no terminator is discarded, since
+   the ceiling cuts mid-word and vanilla lines never do.
+3. Quoting. Every shipped speech block is ONE pair of quotes around the whole
+   paragraph -- see alienuscript.txt's INTRO3 -- so the model's own quotes come
+   out and exactly one pair goes back on. This replaces a "no quotation marks
+   anywhere" rule that fought the format: obeyed it produced unquoted speech,
+   and disobeyed it produced a quoted fragment per sentence.
+
+If nothing survives, the caller's length check sends the block back to vanilla.
+*/
+#define CH_MAX_SENTENCES 4
+
+static bool is_scaffolding(const char* s) {
+    if (s[0] == '-' && (s[1] == ' ' || s[1] == '\0')) {
+        return true;
+    }
+    if (isdigit((unsigned char)s[0]) && (s[1] == '.' || s[1] == ')')) {
+        return true;
+    }
+    // "PHRASING 1:", "RULES:", "NOTE:" -- capitals and spaces up to a colon.
+    int n = 0;
+    while (s[n] && (isupper((unsigned char)s[n]) || isdigit((unsigned char)s[n])
+                    || s[n] == ' ')) {
+        n++;
+    }
+    return n >= 3 && s[n] == ':';
+}
+
+// Two sentences are "the same" if their letters and digits are, ignoring case.
+static void sentence_key(const char* s, size_t len, char* out, size_t out_len) {
+    size_t j = 0;
+    for (size_t i = 0; i < len && j + 1 < out_len; i++) {
+        if (isalnum((unsigned char)s[i])) {
+            out[j++] = (char)tolower((unsigned char)s[i]);
+        }
+    }
+    out[j] = '\0';
+}
+
+static void tidy_reply(char* text) {
+    // 1. Drop everything from the first scaffolding line onwards.
+    for (char* s = text; s; ) {
+        char* nl = strchr(s, '\n');
+        char* next = nl ? nl + 1 : NULL;
+        char save = nl ? *nl : '\0';
+        if (nl) {
+            *nl = '\0';
+        }
+        char* t = s;
+        while (*t == ' ' || *t == '\t' || *t == '"') {
+            t++;
+        }
+        bool bad = is_scaffolding(t);
+        if (nl) {
+            *nl = save;
+        }
+        if (bad) {
+            *s = '\0';
+            break;
+        }
+        s = next;
+    }
+
+    // Quotes come off here so they can never split a sentence below.
+    char flat[4096];
+    size_t j = 0;
+    for (const char* p = text; *p && j + 1 < sizeof(flat); p++) {
+        if (*p == '"') {
+            continue;
+        }
+        flat[j++] = (*p == '\n' || *p == '\r' || *p == '\t') ? ' ' : *p;
+    }
+    flat[j] = '\0';
+
+    /*
+    2. Walk sentence by sentence, keeping the first CH_MAX_SENTENCES distinct
+    ones. A terminator only counts when a space or the end follows it, so an
+    abbreviation like "U.N." does not split; a short run is folded into the next
+    sentence for the same reason.
+    */
+    // Smaller than the caller's buffer, so the pair of quotes added at the end
+    // always fits and the closing one can never be the byte that gets dropped.
+    char kept[4000];
+    size_t k = 0;
+    char keys[CH_MAX_SENTENCES][256];
+    int n_kept = 0;
+    const char* start = flat;
+    for (const char* p = flat; *p && n_kept < CH_MAX_SENTENCES; p++) {
+        bool term = (*p == '.' || *p == '!' || *p == '?')
+                    && (p[1] == '\0' || p[1] == ' ');
+        if (!term) {
+            continue;
+        }
+        size_t len = (size_t)(p - start) + 1;
+        while (len && start[0] == ' ') {
+            start++;
+            len--;
+        }
+        if (len < 12) {
+            continue; // too short to be a sentence -- an abbreviation
+        }
+        char key[256];
+        sentence_key(start, len, key, sizeof(key));
+        bool dup = false;
+        for (int i = 0; i < n_kept && !dup; i++) {
+            dup = !strcmp(keys[i], key);
+        }
+        if (!dup) {
+            if (k && k + 1 < sizeof(kept)) {
+                kept[k++] = ' ';
+            }
+            for (size_t i = 0; i < len && k + 1 < sizeof(kept); i++) {
+                kept[k++] = start[i];
+            }
+            strcpy_n(keys[n_kept], sizeof(keys[0]), key);
+            n_kept++;
+        }
+        start = p + 1;
+    }
+    kept[k] = '\0';
+
+    /*
+    Nothing terminated: the model never closed a sentence at all. Keep the text
+    as it stands rather than blanking the reply -- a rewrite with no full stop is
+    still better than none -- but only up to the sentence cap's worth of it.
+    */
+    if (!k) {
+        strcpy_n(kept, sizeof(kept), flat);
+        k = strlen(kept);
+    }
+    while (k && (kept[k-1] == ' ' || kept[k-1] == '\t')) {
+        kept[--k] = '\0';
+    }
+    if (!k) {
+        text[0] = '\0';
+        return;
+    }
+
+    // 3. One pair of quotes around the whole thing, as the shipped blocks have.
+    snprintf(text, 4096, "\"%s\"", kept);
 }
 
 // ── HTTP to chiron-bridge ──────────────────────────────────────────────────
@@ -1028,6 +1190,21 @@ whole payload and stays; the scaffolding around it does not need to be prose.
 "You favour %s and refuse %s.\n"
 "Your voice: \"%s\"\n"
 "Speaking to %s, mission year %d, turn %d.\n"
+/*
+The variation counter belongs HERE, in the context, and not at the end as a rule.
+
+It used to be the last line of the prompt, phrased as "- Phrasing 3: word it
+differently than before." -- a numbered item at the very end of a bullet list,
+which is the strongest possible cue to continue the list. Santiago duly did:
+the popup opened with "- Phrasing 2: use a metaphor. - Phrasing 3: use a direct
+address." and then three complete alternative greetings labelled PHRASING 1/2/3.
+The scaffolding meant to defeat greedy sampling became the thing on screen.
+
+Stated as a fact about this conversation instead, it still perturbs the prompt
+-- which is all it was ever for, since synapd has no temperature -- without
+looking like a list that wants finishing.
+*/
+"This is conversation %d; word it differently than you did before.\n"
 "\n"
 "Rewrite this message in your voice. Same meaning, same request, same outcome.\n"
 "MESSAGE:\n%s\n"
@@ -1037,17 +1214,24 @@ whole payload and stays; the scaffolding around it does not need to be prose.
 "- $TITLE1 $NAME2 stay together in that order. Invent no new $placeholders.\n"
 "- Drop a placeholder only together with the words around it, so no dangling "
 "phrase is left behind.\n"
-"- ONE paragraph, 2-4 sentences, shorter than the original. No quotation marks "
-"anywhere.\n"
-"- Reply with only the message, no preamble.\n"
-"- Phrasing %d: word it differently than before.\n",
+"- At most 3 sentences, and shorter than the message above.\n"
+"- Say it once. Do not restate the same point in other words.\n"
+"- Output the message itself and nothing else: no preamble, no notes, no "
+"alternatives, no lists.\n"
+"\n"
+/*
+End on a cue to speak, not on the last rule. A prompt that stops after a bullet
+invites another bullet; one that stops after a label invites the thing the label
+names.
+*/
+"MESSAGE IN YOUR VOICE:\n",
         p->title, p->leader, p->faction,
         p->background, p->ideology, p->goal, p->adjectives,
         p->accusation, p->mockery, p->preferred, p->aversion, p->blurb,
         listener_name, *CurrentMissionYear, *CurrentTurn,
+        variation_counter(),
         prose,
-        token_count ? token_list : "(none)",
-        variation_counter());
+        token_count ? token_list : "(none)");
 }
 
 // ── the rewrite ────────────────────────────────────────────────────────────
@@ -1195,6 +1379,8 @@ FILE* chiron_rewrite_block(FILE* src, const char* label) {
     // Safety net: a conditional invented despite never being shown one.
     flatten_conditionals(generated);
     scrub_unknown_tokens(generated, tokens, token_count);
+    // Before the placeholder check, so a token only trimming removes is caught.
+    tidy_reply(generated);
 
     /*
     Every data-carrying placeholder must survive. Losing $TECH0 or $NUM0 would
