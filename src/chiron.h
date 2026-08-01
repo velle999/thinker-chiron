@@ -30,8 +30,14 @@ struct ChironConfig {
 
 extern ChironConfig chiron_conf;
 
-void chiron_init();
-void chiron_shutdown();
+/*
+There is deliberately no init entry point called from DllMain.
+
+Setup runs lazily on first use instead. Winsock startup loads further DLLs, and
+doing that from DllMain means requesting the loader lock while already holding
+it -- which left the game unable to allocate its draw buffer, long after this
+code had finished. Everything below is safe to call from normal game context.
+*/
 
 // Records who is speaking to whom; called from mod_diplomacy_caption.
 void chiron_set_speakers(int faction1, int faction2);

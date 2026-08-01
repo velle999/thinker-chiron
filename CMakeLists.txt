@@ -21,6 +21,21 @@ enable_language(RC)
 # Use GNU windres style for RC compile rule
 set(CMAKE_RC_COMPILE_OBJECT "<CMAKE_RC_COMPILER> -O coff <DEFINES> <INCLUDES> <FLAGS> -i <SOURCE> -o <OBJECT>")
 
+# ---------- C runtime ----------
+# Thinker shares FILE* handles and heap allocations directly with a 1999 game
+# built against msvcrt. Toolchains that default to UCRT (Arch's mingw-w64 does)
+# link api-ms-win-crt-* instead, giving the DLL a separate heap and an
+# incompatible FILE layout. The symptom is not a crash in the mod: the game
+# comes up, plays its music, then dies with "Unable to allocate draw-buffer".
+# Upstream's released DLL imports msvcrt.dll, so match it exactly.
+# Verify with: i686-w64-mingw32-objdump -p thinker.dll | grep 'DLL Name'
+add_compile_options(-mcrtdll=msvcrt-os)
+add_link_options(-mcrtdll=msvcrt-os)
+
+# libstdc++ here was configured for UCRT and assumes C11 quick_exit exists.
+# See src/msvcrt_compat.h.
+add_compile_options(-include ${CMAKE_CURRENT_SOURCE_DIR}/src/msvcrt_compat.h)
+
 # ---------- Common compiler flags ----------
 set(COMMON_CXX_FLAGS "-pedantic -Wall -Wextra -Wshadow -Wundef -Wuseless-cast -Wpointer-arith -Wfloat-conversion")
 

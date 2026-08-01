@@ -18,6 +18,8 @@ static int listener_faction = -1;  // who it is talking to (usually the player)
 #define CH_LINE_LEN  512
 #define CH_GEN_FILE  "chiron_gen.txt"
 
+static void chiron_ensure_init();
+
 static void ch_log(const char* fmt, ...) {
     if (!chiron_conf.debug || !chiron_log) {
         return;
@@ -183,11 +185,13 @@ static const Personality* find_personality(int faction_id) {
 // ── plumbing ───────────────────────────────────────────────────────────────
 
 void chiron_set_speakers(int faction1, int faction2) {
+    chiron_ensure_init();
     speaker_faction = faction1;
     listener_faction = faction2;
 }
 
 bool chiron_should_rewrite(const char* filename, const char* label) {
+    chiron_ensure_init();
     if (!chiron_conf.enabled || !filename || !label) {
         return false;
     }
@@ -685,7 +689,17 @@ FILE* chiron_rewrite_block(FILE* src, const char* label) {
     return gen;
 }
 
-void chiron_init() {
+static bool chiron_ready = false;
+
+/*
+Runs on first use, never from DllMain. See the note in chiron.h.
+*/
+static void chiron_ensure_init() {
+    if (chiron_ready) {
+        return;
+    }
+    chiron_ready = true;
+
     chiron_conf.enabled = 1;
     chiron_conf.port = 11436;
     strcpy_n(chiron_conf.host, sizeof(chiron_conf.host), "127.0.0.1");
@@ -724,15 +738,6 @@ void chiron_init() {
     ch_log("chiron_init: enabled=%d %s:%d timeout=%dms winsock=%d\n",
         chiron_conf.enabled, chiron_conf.host, chiron_conf.port,
         chiron_conf.timeout_ms, (int)winsock_ready);
+
 }
 
-void chiron_shutdown() {
-    if (winsock_ready) {
-        WSACleanup();
-        winsock_ready = false;
-    }
-    if (chiron_log) {
-        fclose(chiron_log);
-        chiron_log = NULL;
-    }
-}
