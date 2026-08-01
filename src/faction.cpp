@@ -1,5 +1,6 @@
 
 #include "faction.h"
+#include "chiron.h"
 
 static char PlrBuf[StrBufLen] = {};
 
@@ -638,6 +639,19 @@ void __cdecl double_cross(int faction_id_atk, int faction_id_def, int faction_id
     int is_allowed = 0;
     int is_victim = 0;
     if (has_treaty(faction_id_atk, faction_id_def, DIPLO_ATROCITY_VICTIM) || plr_def->major_atrocities) {
+        is_victim = 1;
+    }
+    /*
+    Chiron: a faction that was told to call its probe teams off and refused has
+    given grounds, so breaking with it carries no dishonour.
+
+    is_victim is the engine's own name for exactly this -- "they wronged you
+    first" -- and it already suppresses the integrity_blemishes below at every
+    site that matters. Reusing it means the casus belli behaves like the
+    atrocity case the game already models, rather than a second rule bolted
+    alongside it.
+    */
+    if (chiron_probe_refused(faction_id_def, faction_id_atk)) {
         is_victim = 1;
     }
     if (faction_id_other >= 0) {

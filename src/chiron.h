@@ -101,6 +101,14 @@ agreement mean anything.
 bool chiron_probe_warned(int faction_id, int tgt_faction);
 
 /*
+True if faction_id refused a warning from tgt_faction recently enough for it
+still to be grounds for war. Read by double_cross() in faction.cpp, where it
+feeds the engine's own is_victim flag so that breaking with them costs no
+integrity -- the same treatment the game already gives an atrocity victim.
+*/
+bool chiron_probe_refused(int faction_id, int tgt_faction);
+
+/*
 Per-turn check for probe operations against the player, offering the
 confrontation when one is found. Called from faction_upkeep.
 */

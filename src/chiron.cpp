@@ -1933,6 +1933,13 @@ bool chiron_name_base(int faction_id, char* name, bool sea_base) {
     return false;
 }
 
+// One-line popup through Thinker's stock #GENERIC block: caption plus a line.
+static void chiron_notice(const char* caption, const char* text) {
+    parse_says(0, caption, -1, -1);
+    parse_says(1, text, -1, -1);
+    popp("modmenu", "GENERIC", 0, 0, 0);
+}
+
 // ── probe protests ─────────────────────────────────────────────────────────
 
 /*
@@ -2004,6 +2011,30 @@ bool chiron_probe_warned(int faction_id, int tgt_faction) {
         return false;
     }
     return *CurrentTurn - when < CH_WARN_DURATION;
+}
+
+/*
+Did tgt_faction refuse a warning from faction_id, recently enough to still be
+grounds for war?
+
+Refusal is stored as a negative turn on the faction that refused, indexed by
+whoever warned them. It binds nothing by itself -- what it buys is the right to
+break off relations without the usual dishonour, which double_cross() grants by
+way of its own is_victim flag.
+
+The same window as a heeded warning applies, so a refusal in 2120 does not
+justify a betrayal in 2320. Grounds you never acted on go stale.
+*/
+bool chiron_probe_refused(int faction_id, int tgt_faction) {
+    if (faction_id < 1 || faction_id >= MaxPlayerNum
+        || tgt_faction < 1 || tgt_faction >= MaxPlayerNum) {
+        return false;
+    }
+    int when = MFactions[faction_id].chiron_warned_turn[tgt_faction];
+    if (when >= 0) {
+        return false;
+    }
+    return *CurrentTurn - (-when) < CH_WARN_DURATION;
 }
 
 /*
@@ -2135,9 +2166,19 @@ static bool run_protest(int speaker, int listener) {
     ch_log("[protest] %s %s (standing=%d)\n", MFactions[speaker].filename,
         heeds ? "agreed to stop" : "refused", standing_with(speaker, listener));
 
-    parse_says(0, MFactions[speaker].formal_name_faction, -1, -1);
-    parse_says(1, answer, -1, -1);
-    popp("modmenu", "GENERIC", 0, 0, 0);
+    chiron_notice(MFactions[speaker].formal_name_faction, answer);
+
+    /*
+    Say plainly what a refusal just bought, or the mechanic is invisible and the
+    demand becomes the button that changes nothing this feature exists to avoid.
+    */
+    if (!heeds && standing_with(speaker, listener) != CH_STAND_NONE) {
+        char notice[256];
+        snprintf(notice, sizeof(notice),
+            "They have refused us. For the next %d turns we may break off "
+            "relations with them without dishonour.", CH_WARN_DURATION);
+        chiron_notice("Foreign Affairs", notice);
+    }
     return heeds;
 }
 
@@ -2339,11 +2380,8 @@ static int news_deltas(const NewsSnapshot& prev, char* out, size_t out_len) {
     return changes;
 }
 
-// One-line popup through the stock #GENERIC block.
 static void news_notice(const char* text) {
-    parse_says(0, "Planetnet", -1, -1);
-    parse_says(1, text, -1, -1);
-    popp("modmenu", "GENERIC", 0, 0, 0);
+    chiron_notice("Planetnet", text);
 }
 
 void chiron_show_news() {
