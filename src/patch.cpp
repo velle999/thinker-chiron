@@ -443,24 +443,24 @@ bool patch_setup(Config* cf) {
     write_offset(0x64D947, (void*)mod_except_handler3);
 
     /*
-    Route the engine's text reader through our own.
+    NOT hooked: write_jump(0x5FD550, (int)text_open).
 
     config.cpp reimplements text_open/text_get/text_close and config.h declares
-    all three, but nothing ever redirected the engine to them -- Thinker's
-    versions were only reached when Thinker's own code called them directly
-    (probe.cpp, veh_action.cpp), so every dialogue box the game itself opened
-    went to the original at 0x5FD550 and never passed through here.
+    all three, but nothing redirects the engine to them, so the game's own
+    dialogue never passes through Thinker's version. Chiron Rising intercepts
+    faction speech inside text_open, which makes it a no-op for in-game text.
 
-    Chiron Rising intercepts faction speech inside text_open, which made it a
-    no-op for all in-game dialogue: the mod loaded, initialised, matched no
-    labels, and produced vanilla text with no sign anything was wrong.
+    Redirecting it does reach the hook -- the first engine call arrives as
+    "jackal / FILEWIN" instead of Thinker's own ALPHAX read -- and then the game
+    dies on that very first lookup. Thinker's text_open is not a drop-in for the
+    engine's: it assumes the Text struct's buffers are already set up, which the
+    engine's own version does for itself. That is presumably why upstream
+    declares these but has not wired them.
 
-    Only text_open is redirected. The engine's text_get and text_close operate
-    on the same shared Text struct, and now that the DLL is built against
-    msvcrt they share a FILE layout with it, so a FILE* opened here is one the
-    engine can keep reading from.
+    Intercepting engine dialogue needs a pass-through hook that calls the
+    original rather than replacing it, which means a trampoline for the
+    overwritten prologue. Left undone deliberately; see README.
     */
-    write_jump(0x5FD550, (int)text_open);
 
     write_jump(0x421670, (int)has_fac);
     write_jump(0x4688E0, (int)MapWin_gen_overlays);
