@@ -368,6 +368,38 @@ so a leader's voice matches what the engine already says about them.
     "Your species has held this Planet for a handful of years. We have held the Manifold "
     "since before your sun had a name."
 },
+{
+    "SUFFIC", "Convener", "Ines Kaya", "Kaya's Sufficiency",
+    "The Unity's chief resource actuary, who spent the voyage costing out a colony that "
+    "would never need to expand and was told it could not be done. She founded one "
+    "anyway, and it has not grown since its fourth year.",
+    "Earth did not die of cruelty, it died of growth. A people who have already decided "
+    "what enough is cannot be bribed, starved or hurried. Every other faction is arguing "
+    "over who should hold the throttle; the throttle is the problem.",
+    "Prove that a civilisation can choose its own ceiling and be happy beneath it.",
+    "unhurried, dry, maddeningly patient, unmoved by threats, quietly superior",
+    "consuming a world faster than it can answer for",
+    "cannot say what they are building toward, only that it must be more",
+    "Eudaimonic society", "Wealth, which mistakes an appetite for a purpose",
+    "Ask what the least is that we can take and still be glad. Answer it honestly once, "
+    "and you never have to answer it again."
+},
+{
+    "ORACLE", "Actuary", "Ilse Ravn", "The Cassandra Directorate",
+    "Director of risk assessment for the Unity mission. She filed the report predicting "
+    "the mutiny, by name and by date, and was still filing appeals against her own "
+    "findings when the ship broke apart above Planet.",
+    "Certainty is the only commodity on this world that does not spoil. Belief is what "
+    "people reach for when they cannot do the arithmetic. I do not ask to be trusted. "
+    "I ask to be read, and afterward there is no argument about what was known.",
+    "Publish what is coming, and be proved right whether or not anyone acts on it.",
+    "precise, bloodless, insufferably correct, incapable of flattery, never surprised",
+    "acting on faith where a number was available",
+    "will call it fate when it was on my desk a decade ago",
+    "Knowledge values", "Fundamentalism, which is a refusal to look at the figures",
+    "I have never once been wrong about this world, and never once been believed in "
+    "time. I have stopped regarding those as separate problems."
+},
 };
 
 static const Personality* find_personality(int faction_id) {
