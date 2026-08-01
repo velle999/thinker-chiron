@@ -838,6 +838,72 @@ static void sentence_key(const char* s, size_t len, char* out, size_t out_len) {
     out[j] = '\0';
 }
 
+/*
+Cut the reply where the model stops being in the world and starts talking about
+the text it just wrote.
+
+A Planetnet dispatch came out ending "Our position weakened. -- This is a
+response to a prompt from r/WritingPrompts (https://www.reddit.com/...)". That is
+training data bleeding through, and it is invisible to the scaffolding test: not
+a bullet, not an ALL-CAPS label, just an em dash and a change of subject halfway
+down a line.
+
+It cannot be argued away with a rule either, because the model does not think it
+is breaking one -- so it is cut deterministically instead. A leader on Planet has
+no URL to give and no prompt to acknowledge, so the markers below are safe to
+treat as "everything from here is not part of the fiction", and they are checked
+mid-line rather than only at a line start.
+*/
+static const char* MetaMarkers[] = {
+    "http://", "https://", "www.", "reddit", " r/",
+    "this is a response", "this response", "as an ai", "as a language model",
+    "i hope this", "let me know", "feel free to", "disclaimer",
+    "(note", "note that this", "prompt from", "original prompt",
+};
+
+// strstr, case-insensitively, without depending on a non-standard _stristr.
+static const char* find_nocase(const char* hay, const char* needle) {
+    size_t n = strlen(needle);
+    if (!n) {
+        return NULL;
+    }
+    for (const char* p = hay; *p; p++) {
+        if (!_strnicmp(p, needle, n)) {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+static void cut_at_meta(char* text) {
+    char* cut = NULL;
+    for (auto& marker : MetaMarkers) {
+        const char* hit = find_nocase(text, marker);
+        if (hit && (!cut || hit < cut)) {
+            cut = (char*)hit;
+        }
+    }
+    if (!cut) {
+        return;
+    }
+    *cut = '\0';
+    /*
+    The cut usually lands just after a dash or a bracket that was leading into
+    the aside, so walk back over the join. Trailing sentence punctuation stays:
+    "Our position weakened. -- " has to come back as "Our position weakened."
+    */
+    size_t n = strlen(text);
+    while (n && (text[n-1] == ' ' || text[n-1] == '-' || text[n-1] == ','
+                 || text[n-1] == ';' || text[n-1] == ':' || text[n-1] == '('
+                 || text[n-1] == '\n' || text[n-1] == '\t'
+                 // Any non-ASCII trailing byte: an em dash arrives as three
+                 // UTF-8 bytes or one cp1252 byte depending on the backend, and
+                 // the game's bitmap fonts cannot draw either.
+                 || (unsigned char)text[n-1] >= 0x80)) {
+        text[--n] = '\0';
+    }
+}
+
 // Everything from the first scaffolding line onwards is the model narrating the
 // task rather than doing it, and so is everything after it.
 static void cut_at_scaffolding(char* text) {
@@ -865,6 +931,7 @@ static void cut_at_scaffolding(char* text) {
 }
 
 static void tidy_reply(char* text) {
+    cut_at_meta(text);
     cut_at_scaffolding(text);
 
     // Quotes come off here so they can never split a sentence below.
@@ -1903,6 +1970,7 @@ static void refill_name_pool(int faction_id, int sea) {
         return;
     }
     strip_preamble(reply);
+    cut_at_meta(reply);
 
     int count = 0;
     for (char* s = reply; *s && count < CH_POOL_SIZE; ) {
@@ -2449,9 +2517,23 @@ void chiron_show_news() {
             news_notice("No developments since the last bulletin.");
             return;
         }
+        /*
+        Hand over the elapsed span, not the two turn numbers.
+
+        Given "turn 288, now turn 301" the model works out the gap itself and
+        gets it wrong about one time in five -- "in the last 12 turns" for a
+        thirteen turn gap. It is the same lesson as the deltas themselves: give
+        it the fact rather than the means to derive it, because anything it
+        derives it can derive incorrectly, and a wire service being confidently
+        wrong about dates reads worse than one saying nothing.
+        */
+        int elapsed = *CurrentTurn - last_news.turn;
+        if (elapsed < 1) {
+            elapsed = 1;
+        }
         snprintf(facts, sizeof(facts),
-            "Since the last bulletin (turn %d, now turn %d):\n%s%s",
-            last_news.turn, *CurrentTurn, deltas, standing);
+            "Since the last bulletin, %d turn%s ago:\n%s%s",
+            elapsed, elapsed == 1 ? "" : "s", deltas, standing);
     }
     take_snapshot(last_news);
 
@@ -2480,8 +2562,9 @@ void chiron_show_news() {
 The anti-invention rule goes last, on its own, for the same reason the
 placeholder reminder does: the close of the prompt is what carries.
 */
-"Report only what is listed above. Invent no battle, no famine, no treaty, no "
-"number and no faction beyond it.\n"
+"Report only what is listed above. Invent no battle, no famine, no treaty and "
+"no faction beyond it. Use only the numbers given: do not add, total, compare "
+"or turn any of them into a percentage or a share.\n"
 "\n"
 "DISPATCH:\n",
         our_name, facts, variation_counter(), CH_WRAP_COLS);
@@ -2499,6 +2582,7 @@ placeholder reminder does: the close of the prompt is what carries.
         return;
     }
     strip_preamble(reply);
+    cut_at_meta(reply);
     cut_at_scaffolding(reply);
 
     /*
