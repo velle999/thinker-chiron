@@ -168,7 +168,9 @@ void init_save_game(int faction_id) {
         return;
     }
     if (!*CurrentTurn) {
-        memset(&m->thinker_probe_lost, 0, 20);
+        // probe_lost/renew/last_mc_turn/probe_end_turn[8] = 20, plus Chiron's
+        // chiron_warned_turn[8] = 16. Grow this with the block above it.
+        memset(&m->thinker_probe_lost, 0, 36);
     }
     m->thinker_unused[0] = 0;
     m->thinker_unused[1] = 0;

@@ -1,5 +1,6 @@
 
 #include "gameturn.h"
+#include "chiron.h"
 
 
 static bool territory_avail(int faction_id, int x, int y) {
@@ -988,6 +989,11 @@ void __cdecl faction_upkeep(int faction_id) {
             call_council(faction_id);
         }
     }
+    /*
+    Offer the player a response to any probe operation run against them since
+    last turn. Ahead of the autosave so a decision taken here is in the save.
+    */
+    chiron_check_thefts(faction_id);
     if (!*MultiplayerActive && *GamePreferences & PREF_BSC_AUTOSAVE_EACH_TURN
     && faction_id == MapWin->cOwner) {
         auto_save();

@@ -135,6 +135,14 @@ Value:
 #caption $MSG0
 $MSG1
 
+#CHIRONPROBE
+#xs 440
+#caption $MSG0
+$MSG1
+
+Say nothing.
+Demand that they call off their probe teams.
+
 #CHIRONNEWS
 #xs 440
 #caption $MSG0

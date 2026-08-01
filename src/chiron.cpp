@@ -1933,6 +1933,271 @@ bool chiron_name_base(int faction_id, char* name, bool sea_base) {
     return false;
 }
 
+// ── probe protests ─────────────────────────────────────────────────────────
+
+/*
+Give the player something to say when an ally robs them.
+
+The game exempts probe teams from diplomacy entirely. A faction you are not at
+war with can strip your labs every few turns and the only answers are to accept
+it or declare war, which usually costs more than the research did. There is no
+way to object and have the objection mean anything.
+
+Two things make it fixable cheaply. The engine already counts successful
+operations per pair in diplo_stolen_techs and diplo_mind_control, so a theft is
+detected by diffing those rather than by instrumenting probe()'s 600-line
+dispatch. And veh_action.cpp already gates whether a probe unit acts on a
+target, so refusing on a faction's behalf is one more condition on an if that
+exists.
+
+Note what the engine gate does and does not cover: it tests DIPLO_PACT and NOT
+DIPLO_TREATY, so an AI pact partner already declines unless the probe was
+waypointed onto the base, while treaty partners help themselves. The protest
+applies to everyone regardless -- what changes with standing is what you can
+threaten, since a pact is only leverage if there is a pact to withdraw.
+
+Chiron decides the WORDS, never the OUTCOME. Whether they back down is settled
+below from faction state on the same terms the rest of the engine uses; the
+model is only asked to say it in character. A leader who agrees and then keeps
+stealing would be worse than no feature at all.
+*/
+#define CH_WARN_DURATION 30   // turns a heeded warning holds
+
+enum ChironStanding {
+    CH_STAND_NONE = 0,
+    CH_STAND_TREATY,
+    CH_STAND_PACT,
+};
+
+static int standing_with(int a, int b) {
+    if (a < 1 || b < 1 || a >= MaxPlayerNum || b >= MaxPlayerNum) {
+        return CH_STAND_NONE;
+    }
+    if (Factions[a].diplo_status[b] & DIPLO_PACT) {
+        return CH_STAND_PACT;
+    }
+    if (Factions[a].diplo_status[b] & DIPLO_TREATY) {
+        return CH_STAND_TREATY;
+    }
+    return CH_STAND_NONE;
+}
+
+/*
+True while faction_id is under a warning from tgt that it agreed to.
+
+Stored on the WARNED faction, indexed by who warned them, as the turn it was
+given; negative records a refusal, which binds nothing but is remembered. The
+warning lapses after CH_WARN_DURATION so it is a reprieve rather than permanent
+immunity -- and so a single early conversation cannot settle the whole game.
+*/
+bool chiron_probe_warned(int faction_id, int tgt_faction) {
+    if (faction_id < 1 || faction_id >= MaxPlayerNum
+        || tgt_faction < 1 || tgt_faction >= MaxPlayerNum) {
+        return false;
+    }
+    int when = MFactions[faction_id].chiron_warned_turn[tgt_faction];
+    if (when <= 0) {
+        return false;
+    }
+    // A vendetta cancels every promise made before it.
+    if (Factions[faction_id].diplo_status[tgt_faction] & DIPLO_VENDETTA) {
+        return false;
+    }
+    return *CurrentTurn - when < CH_WARN_DURATION;
+}
+
+/*
+Will they back down? Decided from faction state, never by the model.
+
+The question is whether they have more to lose from your anger than from giving
+up the operation, so it turns on what standing they would forfeit and whether
+you are in any position to make it hurt. Ranking is the engine's own power
+order.
+*/
+static bool will_heed_warning(int speaker, int listener) {
+    int stand = standing_with(speaker, listener);
+    int mine = Factions[listener].ranking;
+    int theirs = Factions[speaker].ranking;
+
+    // A pact is worth keeping unless they hold you in contempt.
+    if (stand == CH_STAND_PACT) {
+        return theirs <= mine + 3;
+    }
+    // A treaty is thinner; they weigh it against your strength.
+    if (stand == CH_STAND_TREATY) {
+        return theirs <= mine + 1;
+    }
+    // No standing to lose. Only raw strength talks, and rarely.
+    return mine > theirs + 1;
+}
+
+static void protest_prompt(int speaker, int listener, bool heeds,
+                           char* out, size_t out_len) {
+    const Personality* p = find_personality(speaker);
+    int stand = standing_with(speaker, listener);
+    const char* bond =
+        stand == CH_STAND_PACT   ? "You are bound to them by a PACT." :
+        stand == CH_STAND_TREATY ? "You hold a TREATY of friendship with them." :
+                                   "You have no treaty or pact with them.";
+    /*
+    Never name a bond in the branch where there is none. An earlier wording said
+    they had "no formal tie to withdraw" and Santiago answered "our treaty with
+    Gaia's Stepdaughters does not apply here" -- the word alone was enough to
+    conjure the thing it was denying.
+    */
+    const char* leverage =
+        stand == CH_STAND_PACT   ? "They have threatened to tear up the pact." :
+        stand == CH_STAND_TREATY ? "They have threatened to tear up the treaty." :
+                                   "Nothing binds the two of you. They have only "
+                                   "their own strength to threaten you with.";
+
+    char dossier[1024];
+    build_dossier(speaker, listener, dossier, sizeof(dossier));
+
+    snprintf(out, out_len,
+"You are %s %s of %s on Planet.\n"
+"BACKGROUND: %s\n"
+"IDEOLOGY: %s\n"
+"YOU ARE: %s\n"
+"Your voice: \"%s\"\n"
+"\n"
+"WHAT HAS PASSED BETWEEN YOU:\n%s"
+"\n"
+"THE SITUATION:\n"
+"- Your probe teams have been caught stealing from %s.\n"
+"- %s\n"
+"- They have confronted you and demanded you call your probe teams off.\n"
+"- %s\n"
+"\n"
+"You have decided to %s.\n"
+"\n"
+"Answer them. Conversation %d.\n"
+"\n"
+"RULES:\n"
+"- Two or three sentences. Speak directly to them.\n"
+"- %s\n"
+"- Do not apologise for what you are. Stay in character.\n"
+"- No quotation marks, no preamble, no notes.\n"
+"\n"
+"Say it once, and do not restate it in other words.\n"
+"\n"
+"YOUR ANSWER:\n",
+        p->title, p->leader, p->faction,
+        p->background, p->ideology, p->adjectives, p->blurb,
+        dossier,
+        MFactions[listener].formal_name_faction,
+        bond, leverage,
+        heeds ? "CALL THEM OFF" : "REFUSE",
+        variation_counter(),
+        /*
+        "Concede without grovelling" produced one flat sentence, and the same
+        one from every leader -- "your concern is noted, my probe teams will
+        withdraw". Conceding is the harder of the two to write, so it needs the
+        more specific direction: give a reason of your own, in your own idiom.
+        */
+        heeds
+            ? "You are agreeing to stop. Say so plainly and give your OWN "
+              "reason for it, in your own idiom -- a decision you have taken, "
+              "not a surrender. Do not use the words 'noted' or 'immediately'."
+            : "You are refusing. Make plain that you will not be dictated to.");
+}
+
+/*
+Run the confrontation. Returns true if they agreed to stop.
+
+Called when the player has just discovered a theft and chosen to object.
+*/
+static bool run_protest(int speaker, int listener) {
+    bool heeds = will_heed_warning(speaker, listener);
+    const Personality* p = find_personality(speaker);
+
+    char answer[1024];
+    answer[0] = '\0';
+    if (p) {
+        static char prompt[4096];
+        protest_prompt(speaker, listener, heeds, prompt, sizeof(prompt));
+        static char reply[4096];
+        if (http_generate(prompt, reply, sizeof(reply), chiron_conf.max_tokens)) {
+            strip_preamble(reply);
+            tidy_reply(reply);
+            strcpy_n(answer, sizeof(answer), reply);
+        }
+    }
+    if (!answer[0]) {
+        // Bridge down or unusable reply: the outcome still stands.
+        strcpy_n(answer, sizeof(answer), heeds
+            ? "\"Very well. Our operatives will be recalled.\""
+            : "\"We will do as we see fit. Do not presume to instruct us.\"");
+    }
+
+    MFactions[speaker].chiron_warned_turn[listener] =
+        (int16_t)(heeds ? *CurrentTurn : -*CurrentTurn);
+    ch_log("[protest] %s %s (standing=%d)\n", MFactions[speaker].filename,
+        heeds ? "agreed to stop" : "refused", standing_with(speaker, listener));
+
+    parse_says(0, MFactions[speaker].formal_name_faction, -1, -1);
+    parse_says(1, answer, -1, -1);
+    popp("modmenu", "GENERIC", 0, 0, 0);
+    return heeds;
+}
+
+/*
+Watch for thefts against the player and offer the confrontation.
+
+Diffed rather than hooked, for the same reason Planetnet is: the counters are
+already maintained by the engine and cost nothing to read, where probe()'s
+dispatch is 600 lines with a dozen action paths.
+*/
+static int theft_seen[MaxPlayerNum];
+
+void chiron_check_thefts(int faction_id) {
+    chiron_ensure_init();
+    if (!chiron_conf.enabled || !chiron_conf.probe_protests) {
+        return;
+    }
+    // Only the player gets asked; the AI factions settle this among themselves.
+    if (faction_id < 1 || faction_id != (MapWin ? MapWin->cOwner : 0)) {
+        return;
+    }
+    for (int i = 1; i < MaxPlayerNum; i++) {
+        if (i == faction_id) {
+            continue;
+        }
+        int total = Factions[faction_id].diplo_stolen_techs[i]
+                  + Factions[faction_id].diplo_mind_control[i];
+        int prev = theft_seen[i];
+        theft_seen[i] = total;
+        if (total <= prev || !prev) {
+            /*
+            A zero baseline is the first turn we looked, not a new theft --
+            counters carried in from a save would otherwise all read as fresh
+            outrages the moment the game loads.
+            */
+            continue;
+        }
+        if (Factions[faction_id].diplo_status[i] & DIPLO_VENDETTA) {
+            continue;   // already at war; there is nothing left to threaten
+        }
+        if (chiron_probe_warned(i, faction_id)) {
+            continue;   // they are already under a warning they accepted
+        }
+
+        parse_says(0, MFactions[i].formal_name_faction, -1, -1);
+        int stand = standing_with(i, faction_id);
+        parse_says(1, stand == CH_STAND_PACT
+            ? "Their probe teams have been caught operating against us, in "
+              "defiance of our pact. Demand that they stop?"
+            : stand == CH_STAND_TREATY
+            ? "Their probe teams have been caught operating against us, in "
+              "defiance of our treaty. Demand that they stop?"
+            : "Their probe teams have been caught operating against us. "
+              "Demand that they stop?", -1, -1);
+        if (X_pop("CHIRONPROBE", 0)) {
+            run_protest(i, faction_id);
+        }
+    }
+}
+
 // ── planetary news digest ──────────────────────────────────────────────────
 
 /*
@@ -2245,6 +2510,7 @@ static void chiron_ensure_init() {
     chiron_conf.max_tokens = 110;
     chiron_conf.cache_size = 64;
     chiron_conf.base_names = 1;
+    chiron_conf.probe_protests = 1;
     chiron_conf.debug = 0;
 
     if (FILE* f = fopen("chiron.ini", "rt")) {
@@ -2264,6 +2530,7 @@ static void chiron_ensure_init() {
             else if (!_stricmp(key, "timeout_ms"))  chiron_conf.timeout_ms = atoi(val);
             else if (!_stricmp(key, "max_tokens"))  chiron_conf.max_tokens = atoi(val);
             else if (!_stricmp(key, "base_names"))  chiron_conf.base_names = atoi(val);
+            else if (!_stricmp(key, "probe_protests")) chiron_conf.probe_protests = atoi(val);
             else if (!_stricmp(key, "debug"))       chiron_conf.debug = atoi(val);
         }
         fclose(f);

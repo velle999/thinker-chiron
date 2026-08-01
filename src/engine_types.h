@@ -236,7 +236,14 @@ struct MFaction {
     uint8_t thinker_probe_renew;
     int16_t thinker_last_mc_turn;
     int16_t thinker_probe_end_turn[8];
-    char pad_1[96];
+    /*
+    Chiron: the turn we last warned this faction off its probe teams, 0 for
+    never, negative for a warning they refused. Taken out of pad_1 rather than
+    added to the struct -- MFaction's total size must not move -- and it lives
+    in this block so the engine saves and loads it with everything else.
+    */
+    int16_t chiron_warned_turn[8];
+    char pad_1[80];
     /*
     End of block
     */

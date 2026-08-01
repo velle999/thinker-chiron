@@ -26,6 +26,7 @@ struct ChironConfig {
     int  max_tokens;
     int  cache_size;        // generated blocks kept per session
     int  base_names;        // name new bases from the faction's culture
+    int  probe_protests;    // let the player object to probe operations
     int  debug;             // write chiron.txt log
 };
 
@@ -91,6 +92,19 @@ Renders through #CHIRONNEWS in modmenu.txt, which must therefore be the copy
 install.sh ships.
 */
 void chiron_show_news();
+
+/*
+True while faction_id has agreed to a warning from tgt_faction and the reprieve
+has not lapsed. Read by the probe gate in veh_action.cpp, which is what makes an
+agreement mean anything.
+*/
+bool chiron_probe_warned(int faction_id, int tgt_faction);
+
+/*
+Per-turn check for probe operations against the player, offering the
+confrontation when one is found. Called from faction_upkeep.
+*/
+void chiron_check_thefts(int faction_id);
 
 // The file chiron_rewrite_block() writes the replacement block into.
 #define CH_GEN_FILE "chiron_gen.txt"

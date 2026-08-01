@@ -1,5 +1,6 @@
 
 #include "veh_action.h"
+#include "chiron.h"
 
 
 int __cdecl terrain_avail(FormerItem frm_id, int ocean, int faction_id) {
@@ -2002,6 +2003,18 @@ int __cdecl order_veh(int veh_id, int offset, int flag) {
         Vehs[veh_id].state |= VSTATE_HAS_MOVED;
         if (Vehs[veh_id].plan() == PLAN_PROBE && tgt_fc_id >= 0 && veh_fc_id != tgt_fc_id) {
             bool check = true;
+            /*
+            An AI faction that agreed to call its probe teams off does so.
+
+            This is what makes the protest in chiron.cpp mean anything: without
+            it a leader could promise to stop and go on stealing, which would be
+            worse than never having offered the conversation. Human factions are
+            not bound -- the player made the demand, and holding them to a
+            promise they never gave is not the mod's business.
+            */
+            if (!is_human(veh_fc_id) && chiron_probe_warned(veh_fc_id, tgt_fc_id)) {
+                check = false;
+            }
             if (*VehAttackFlags & 1) {
                 Vehs[veh_id].flags &= ~VFLAG_PROBE_PACT_OPERATIONS;
                 if (Factions[veh_fc_id].diplo_status[tgt_fc_id] & DIPLO_PACT) {
