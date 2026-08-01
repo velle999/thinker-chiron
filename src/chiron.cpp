@@ -387,6 +387,24 @@ void chiron_set_speakers(int faction1, int faction2) {
     listener_faction = faction2;
 }
 
+/*
+The same file reaches us under two spellings. text_open() is called with the
+bare "SCRIPT" from some paths, but the diplomacy popups pass PopupScriptFile,
+which is "SCRIPT.txt" -- and when text_open() is called with a NULL filename we
+substitute Text.FileName, which always carries the extension.
+
+Comparing against the bare name therefore rejected every diplomacy popup on the
+filename before it ever looked at the label, and the mod produced vanilla text
+for an entire game while looking perfectly healthy.
+*/
+static bool name_is(const char* filename, const char* base) {
+    size_t n = strlen(base);
+    if (_strnicmp(filename, base, n)) {
+        return false;
+    }
+    return filename[n] == '\0' || !_stricmp(filename + n, ".txt");
+}
+
 bool chiron_should_rewrite(const char* filename, const char* label) {
     static bool first = true;
     if (first) {
@@ -398,22 +416,34 @@ bool chiron_should_rewrite(const char* filename, const char* label) {
     if (!chiron_conf.enabled || !filename || !label) {
         return false;
     }
-    // Only the main dialogue script carries faction speech.
-    if (_stricmp(filename, ScriptFile) && _stricmp(filename, "SCRIPT")
-    && _stricmp(filename, "alienIscript")) {
-        return false;
-    }
-    if (!find_personality(speaker_faction)) {
-        return false;
-    }
+
+    bool diplomacy = false;
     for (auto& prefix : DiplomacyLabels) {
-        size_t n = strlen(prefix);
-        if (!_strnicmp(label, prefix, n)) {
-            chiron_trace("hook: rewriting %s (speaker=%d)\n", label, speaker_faction);
-            return true;
+        if (!_strnicmp(label, prefix, strlen(prefix))) {
+            diplomacy = true;
+            break;
         }
     }
-    return false;
+    if (!diplomacy) {
+        return false;
+    }
+
+    /*
+    Past this point the label IS faction speech, so anything that stops us is
+    worth recording. A silent miss here looks exactly like the mod not being
+    installed, which is the most expensive failure mode this thing has.
+    */
+    if (!name_is(filename, ScriptFile) && !name_is(filename, "alienIscript")) {
+        chiron_trace("skip: %s / %s -- unexpected file\n", filename, label);
+        return false;
+    }
+    const Personality* p = find_personality(speaker_faction);
+    if (!p) {
+        chiron_trace("skip: %s -- no bible for faction %d\n", label, speaker_faction);
+        return false;
+    }
+    chiron_trace("hook: rewriting %s (speaker=%d %s)\n", label, speaker_faction, p->leader);
+    return true;
 }
 
 /*
