@@ -417,6 +417,17 @@ bool chiron_should_rewrite(const char* filename, const char* label) {
         return false;
     }
 
+    /*
+    Bounded sample of what the engine actually asks for. Reasoning about which
+    file and label carry faction speech has been wrong twice; this records it.
+    Drop the cap to 0 once the mod is known good -- it is pure diagnostics.
+    */
+    static int sampled = 0;
+    if (sampled < 60) {
+        sampled++;
+        chiron_trace("seen: %s / %s\n", filename, label);
+    }
+
     bool diplomacy = false;
     for (auto& prefix : DiplomacyLabels) {
         if (!_strnicmp(label, prefix, strlen(prefix))) {
