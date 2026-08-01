@@ -84,7 +84,10 @@ target_link_options(thinkerlib PRIVATE
 )
 target_compile_definitions(thinkerlib PRIVATE BUILD_DLL)
 set_target_properties(thinkerlib PROPERTIES PREFIX "" OUTPUT_NAME "thinker" SUFFIX ".dll")
-target_link_libraries(thinkerlib PRIVATE user32 gdi32 winmm psapi ws2_32)
+# Deliberately no ws2_32 here -- chiron.cpp LoadLibrary's it on first use. A
+# static import loads the winsock chain before the game reserves its draw
+# buffer, which kills startup. See the comment above load_winsock().
+target_link_libraries(thinkerlib PRIVATE user32 gdi32 winmm psapi)
 
 # ---------- Launch executable ----------
 file(GLOB THINKER_LAUNCH_SOURCES

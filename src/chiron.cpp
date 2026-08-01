@@ -9,6 +9,65 @@
 
 ChironConfig chiron_conf = {};
 
+/*
+ws2_32 is resolved with LoadLibrary instead of being linked, so the winsock DLL
+chain (mswsock, iphlpapi, dnsapi, ...) does not enter the address space until a
+faction actually speaks.
+
+Linking it statically defeats the lazy init this file is built around. The
+import table is walked while terranx.exe's own imports are still being resolved
+-- long before the first text_open() -- so winsock and its dependencies land in
+the 32-bit address space ahead of the game reserving its draw buffer. A 1999
+binary asking CreateDIBSection for a large contiguous mapping does not survive
+the extra fragmentation, and the game dies at startup with "Unable to allocate
+draw-buffer; terminating program" without a single line of this file having run.
+The giveaway is that chiron.txt is never created even with debug=1.
+
+Failure to load leaves winsock_ready false, which means vanilla text -- the same
+fallback as a dead bridge.
+*/
+static struct {
+    int    (WSAAPI *WSAStartup)(WORD, LPWSADATA);
+    int    (WSAAPI *WSAGetLastError)(void);
+    SOCKET (WSAAPI *socket)(int, int, int);
+    int    (WSAAPI *setsockopt)(SOCKET, int, int, const char*, int);
+    int    (WSAAPI *connect)(SOCKET, const sockaddr*, int);
+    int    (WSAAPI *send)(SOCKET, const char*, int, int);
+    int    (WSAAPI *recv)(SOCKET, char*, int, int);
+    int    (WSAAPI *closesocket)(SOCKET);
+    u_short(WSAAPI *htons)(u_short);
+    unsigned long (WSAAPI *inet_addr)(const char*);
+} ws = {};
+
+static bool load_winsock() {
+    HMODULE h = LoadLibraryA("ws2_32.dll");
+    if (!h) {
+        return false;
+    }
+    // GetProcAddress returns FARPROC; narrowing it to the real signature is the
+    // documented idiom and always trips -Wcast-function-type.
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wcast-function-type"
+    // ...and is a no-op for the one entry whose signature already matches it.
+    #pragma GCC diagnostic ignored "-Wuseless-cast"
+    #define WS_BIND(name) \
+        ws.name = (decltype(ws.name))GetProcAddress(h, #name); \
+        if (!ws.name) return false;
+    WS_BIND(WSAStartup)
+    WS_BIND(WSAGetLastError)
+    WS_BIND(socket)
+    WS_BIND(setsockopt)
+    WS_BIND(connect)
+    WS_BIND(send)
+    WS_BIND(recv)
+    WS_BIND(closesocket)
+    WS_BIND(htons)
+    WS_BIND(inet_addr)
+    #undef WS_BIND
+    #pragma GCC diagnostic pop
+    return true;
+}
+
 static bool winsock_ready = false;
 static FILE* chiron_log = NULL;
 static int speaker_faction = -1;   // the AI faction doing the talking
@@ -432,24 +491,24 @@ static bool http_generate(const char* prompt, char* out, size_t out_len) {
     if (!winsock_ready) {
         return false;
     }
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    SOCKET sock = ws.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock == INVALID_SOCKET) {
         return false;
     }
 
     DWORD tv = (DWORD)chiron_conf.timeout_ms;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+    ws.setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+    ws.setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
 
     sockaddr_in addr = {};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons((u_short)chiron_conf.port);
-    addr.sin_addr.s_addr = inet_addr(chiron_conf.host);
+    addr.sin_port = ws.htons((u_short)chiron_conf.port);
+    addr.sin_addr.s_addr = ws.inet_addr(chiron_conf.host);
 
-    if (connect(sock, (sockaddr*)&addr, sizeof(addr)) != 0) {
+    if (ws.connect(sock, (sockaddr*)&addr, sizeof(addr)) != 0) {
         ch_log("http: connect to %s:%d failed (%d)\n",
-            chiron_conf.host, chiron_conf.port, WSAGetLastError());
-        closesocket(sock);
+            chiron_conf.host, chiron_conf.port, ws.WSAGetLastError());
+        ws.closesocket(sock);
         return false;
     }
 
@@ -469,15 +528,15 @@ static bool http_generate(const char* prompt, char* out, size_t out_len) {
         "Connection: close\r\n\r\n%s",
         chiron_conf.host, chiron_conf.port, body_len, body);
 
-    if (send(sock, req, req_len, 0) != req_len) {
-        closesocket(sock);
+    if (ws.send(sock, req, req_len, 0) != req_len) {
+        ws.closesocket(sock);
         return false;
     }
 
     static char resp[32768];
     int total = 0;
     for (;;) {
-        int n = recv(sock, resp + total, (int)sizeof(resp) - total - 1, 0);
+        int n = ws.recv(sock, resp + total, (int)sizeof(resp) - total - 1, 0);
         if (n <= 0) {
             break;
         }
@@ -486,7 +545,7 @@ static bool http_generate(const char* prompt, char* out, size_t out_len) {
             break;
         }
     }
-    closesocket(sock);
+    ws.closesocket(sock);
     resp[total > 0 ? total : 0] = '\0';
     if (total <= 0) {
         ch_log("http: empty response\n");
@@ -734,7 +793,7 @@ static void chiron_ensure_init() {
     }
 
     WSADATA wsa;
-    winsock_ready = (WSAStartup(MAKEWORD(2, 2), &wsa) == 0);
+    winsock_ready = load_winsock() && ws.WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
     ch_log("chiron_init: enabled=%d %s:%d timeout=%dms winsock=%d\n",
         chiron_conf.enabled, chiron_conf.host, chiron_conf.port,
         chiron_conf.timeout_ms, (int)winsock_ready);
