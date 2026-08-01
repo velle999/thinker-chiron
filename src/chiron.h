@@ -25,6 +25,7 @@ struct ChironConfig {
     int  timeout_ms;        // give up and use vanilla text after this
     int  max_tokens;
     int  cache_size;        // generated blocks kept per session
+    int  base_names;        // name new bases from the faction's culture
     int  debug;             // write chiron.txt log
 };
 
@@ -67,6 +68,17 @@ header of the rewritten block. Returns NULL to mean "use the vanilla block" --
 src is left untouched and still usable in that case.
 */
 FILE* chiron_rewrite_block(FILE* src, const char* label);
+
+/*
+Name a newly founded base from the faction's culture. Writes at most
+MaxBaseNameLen bytes into name and returns true; false means "use the name the
+engine would have picked", which is what happens for factions with no character
+bible, a dead bridge, or an unusable reply.
+
+Called from mod_name_base before any of Thinker's own list handling, so a false
+return leaves the vanilla path exactly as it was, offsets and all.
+*/
+bool chiron_name_base(int faction_id, char* name, bool sea_base);
 
 // The file chiron_rewrite_block() writes the replacement block into.
 #define CH_GEN_FILE "chiron_gen.txt"

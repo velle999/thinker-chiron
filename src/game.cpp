@@ -1,5 +1,6 @@
 
 #include "game.h"
+#include "chiron.h"
 
 static uint32_t custom_game_rules = 0;
 static uint32_t custom_more_rules = 0;
@@ -1319,6 +1320,15 @@ First land/sea base always uses the first available name from land/sea names lis
 Vanilla name_base chooses sea base names in a sequential non-random order (this version is random).
 */
 void __cdecl mod_name_base(int faction_id, char* name, bool save_offset, bool sea_base) {
+    /*
+    Ahead of everything, including conf.new_base_names: a generated name comes
+    from the faction's culture rather than from either name list, so neither
+    list's offset should move. A false return leaves the vanilla path below
+    untouched and it picks up exactly where it was.
+    */
+    if (chiron_name_base(faction_id, name, sea_base)) {
+        return;
+    }
     if (!conf.new_base_names) {
         return name_base(faction_id, name, save_offset, sea_base);
     }

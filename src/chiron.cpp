@@ -1037,7 +1037,10 @@ static bool ensure_winsock() {
     return winsock_ready;
 }
 
-static bool http_generate(const char* prompt, char* out, size_t out_len) {
+// max_tokens is per call: a dialogue line and a list of base names want very
+// different budgets, and the budget is the whole cost of the blocking pause.
+static bool http_generate(const char* prompt, char* out, size_t out_len,
+                          int max_tokens) {
     if (!ensure_winsock()) {
         return false;
     }
@@ -1092,7 +1095,7 @@ static bool http_generate(const char* prompt, char* out, size_t out_len) {
     static char req[20000];
     json_escape(prompt, esc, sizeof(esc));
     int body_len = snprintf(body, sizeof(body),
-        "{\"prompt\":\"%s\",\"max_tokens\":%d}", esc, chiron_conf.max_tokens);
+        "{\"prompt\":\"%s\",\"max_tokens\":%d}", esc, max_tokens);
 
     int req_len = snprintf(req, sizeof(req),
         "POST /generate HTTP/1.1\r\n"
@@ -1368,7 +1371,8 @@ FILE* chiron_rewrite_block(FILE* src, const char* label) {
 
     static char generated[4096];
     chiron_trace("rw: prompt built (%d bytes), calling bridge\n", (int)strlen(prompt));
-    bool ok = http_generate(prompt, generated, sizeof(generated));
+    bool ok = http_generate(prompt, generated, sizeof(generated),
+                            chiron_conf.max_tokens);
     chiron_trace("rw: bridge returned %d\n", (int)ok);
     if (!ok) {
         ch_log("[%s] generation failed, using vanilla\n", label);
@@ -1446,6 +1450,328 @@ FILE* chiron_rewrite_block(FILE* src, const char* label) {
     return gen;
 }
 
+// ── generated base names ───────────────────────────────────────────────────
+
+/*
+Name settlements from the faction's own culture instead of a fixed list.
+
+Every game draws the same 75 names from basenames/gaians.txt in much the same
+order, and a wide empire runs the list out and falls through to "Chiron Sector
+14". The character bibles that drive the dialogue describe these cultures well
+enough to name their towns, so they may as well.
+
+Names are generated a POOL AT A TIME, not one per base. Base founding is not a
+dialogue box -- the AI factions do it constantly during turn processing, and a
+2s stall on each would be felt as the turn hanging. One call per CH_POOL_SIZE
+bases puts the cost at a handful of pauses across a whole game, in a place the
+game already stops to draw the base screen.
+
+Land and sea keep separate pools: an undersea platform should not be called
+after a grove.
+*/
+#define CH_POOL_SIZE      12
+#define CH_NAME_MAX_LEN   24   // MaxBaseNameLen is 25 including the terminator
+
+static char name_pool[MaxPlayerNum][2][CH_POOL_SIZE][MaxBaseNameLen];
+static int  name_pool_count[MaxPlayerNum][2];
+/*
+One failure disables the pool for that faction for the session. Without a latch
+a dead bridge is retried at every single base founding, turning a cosmetic
+feature into a repeated stall in the turn loop; the vanilla list is right there
+and costs nothing.
+*/
+static bool name_pool_dead[MaxPlayerNum][2];
+
+static bool name_in_use(const char* name) {
+    for (int i = 0; i < *BaseCount; i++) {
+        if (!_stricmp(Bases[i].name, name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+Pull one candidate name out of a reply line.
+
+The model is asked for a bare list and mostly gives one, but it still likes to
+number the entries, quote them, or add a parenthetical gloss. Anything that
+survives the trimming and is still the length of a name is accepted; anything
+sentence-shaped is not, since a base name that reads as prose is worse than the
+list entry it replaced.
+*/
+static bool parse_name_line(const char* line, char* out) {
+    char buf[256];
+    strcpy_n(buf, sizeof(buf), line);
+
+    char* s = buf;
+    while (*s == ' ' || *s == '\t' || *s == '-' || *s == '*' || *s == '"'
+           || *s == '\'') {
+        s++;
+    }
+    // "3." or "3)" numbering
+    if (isdigit((unsigned char)s[0])) {
+        char* d = s;
+        while (isdigit((unsigned char)*d)) {
+            d++;
+        }
+        if (*d == '.' || *d == ')') {
+            s = d + 1;
+            while (*s == ' ') {
+                s++;
+            }
+        }
+    }
+    // A gloss in brackets is not part of the name.
+    for (char* c = s; *c; c++) {
+        if (*c == '(' || *c == '[') {
+            *c = '\0';
+            break;
+        }
+    }
+    strtrail(s);
+    size_t n = strlen(s);
+    while (n && (s[n-1] == '"' || s[n-1] == '\'' || s[n-1] == '.'
+                 || s[n-1] == ',' || s[n-1] == ';')) {
+        s[--n] = '\0';
+    }
+    strtrail(s);
+    n = strlen(s);
+
+    if (n < 3 || n > CH_NAME_MAX_LEN) {
+        return false;
+    }
+    if (is_scaffolding(s)) {
+        return false;
+    }
+    // Prose, not a name: placeholders, colons, or too many words.
+    int spaces = 0;
+    for (const char* c = s; *c; c++) {
+        if (*c == '$' || *c == ':' || *c == '#') {
+            return false;
+        }
+        if (!isprint((unsigned char)*c)) {
+            return false;
+        }
+        if (*c == ' ') {
+            spaces++;
+        }
+    }
+    if (spaces > 2) {
+        return false;
+    }
+    /*
+    "CollectiveCold" -- two words welded together, which is what the model does
+    when it is reaching for the creed's vocabulary instead of naming a place.
+    The few-shot examples mostly prevent it; this catches the rest. Nothing is
+    lost by refusing the shape: across every basenames list the game ships,
+    zero of the 986 names have a lowercase letter directly followed by a
+    capital. (The two- and three-word limits are calibrated the same way: only
+    6 of those 986 run to four words or more.)
+    */
+    for (const char* c = s; c[1]; c++) {
+        if (islower((unsigned char)c[0]) && isupper((unsigned char)c[1])) {
+            return false;
+        }
+    }
+    strcpy_n(out, MaxBaseNameLen, s);
+    return true;
+}
+
+/*
+Show the model the faction's OWN shipped names as the house style.
+
+Described only in prose, a 7B reaches for the vocabulary of the creed and welds
+it together: the Hive came back with "CollectiveCold", "IllusionRelease",
+"PainFreedom" -- slogans jammed into CamelCase, nothing like a place. Its actual
+list says "Collective Bastion", "Communal Hub", "Commonalty Core". Six of those
+in the prompt fix the shape at a stroke, and they cost nothing to obtain because
+the game ships one list per faction, already split into #BASES and #WATERBASES.
+
+Examples are spread across the list rather than taken off the top, and the
+starting point rotates, so a refill later in the game anchors on different ones.
+*/
+static int sample_vanilla_names(int faction_id, int sea,
+                                char out[][MaxBaseNameLen], int want) {
+    char path[256];
+    snprintf(path, sizeof(path), "basenames\\%s.txt",
+        MFactions[faction_id].filename);
+    strlwr(path);
+
+    FILE* f = fopen(path, "rt");
+    if (!f) {
+        snprintf(path, sizeof(path), "%s.txt", MFactions[faction_id].filename);
+        strlwr(path);
+        f = fopen(path, "rt");
+    }
+    if (!f) {
+        return 0;
+    }
+
+    const char* label = sea ? "#WATERBASES" : "#BASES";
+    char all[128][MaxBaseNameLen];
+    int total = 0;
+    bool in_block = false;
+    char line[256];
+    while (fgets(line, sizeof(line), f) && total < 128) {
+        kill_lf(line);
+        char* s = strtrim(line);
+        if (s[0] == '#') {
+            // A second label ends the one we want.
+            in_block = !_stricmp(s, label);
+            continue;
+        }
+        if (in_block && strlen(s) >= 3 && strlen(s) <= CH_NAME_MAX_LEN) {
+            strcpy_n(all[total], MaxBaseNameLen, s);
+            total++;
+        }
+    }
+    fclose(f);
+    if (total <= 0) {
+        return 0;
+    }
+
+    int count = 0;
+    int stride = total / want;
+    if (stride < 1) {
+        stride = 1;
+    }
+    int start = variation_counter() % total;
+    for (int i = 0; i < total && count < want; i++) {
+        strcpy_n(out[count], MaxBaseNameLen, all[(start + i*stride) % total]);
+        count++;
+    }
+    return count;
+}
+
+static void refill_name_pool(int faction_id, int sea) {
+    const Personality* p = find_personality(faction_id);
+    if (!p) {
+        // SMACX-only factions have no bible; they keep their shipped names.
+        name_pool_dead[faction_id][sea] = true;
+        return;
+    }
+
+    char examples[6][MaxBaseNameLen];
+    int n_examples = sample_vanilla_names(faction_id, sea, examples, 6);
+    char example_list[512] = {};
+    for (int i = 0; i < n_examples; i++) {
+        size_t used = strlen(example_list);
+        snprintf(example_list + used, sizeof(example_list) - used,
+                 "%s%s", i ? ", " : "", examples[i]);
+    }
+
+    char prompt[4096];
+    snprintf(prompt, sizeof(prompt),
+"You name the settlements of %s on the alien world of Planet.\n"
+"THE FACTION: %s\n"
+"THEIR CREED: %s\n"
+"THEY ARE: %s\n"
+"Founding year %d.\n"
+"\n"
+"Settlements they have already founded: %s\n"
+"\n"
+"List %d names for new %s of this faction, one per line.\n"
+"\n"
+"RULES:\n"
+"- Written like the settlements above: ordinary words, separated by spaces.\n"
+"- One or two words each, %d characters at most.\n"
+"- A PLACE, not a slogan. Never run two words together into one.\n"
+"- Names THIS faction would choose, drawn from their creed and their history.\n"
+"- All %d different from each other and from the ones listed above.\n"
+"- Output the names only: no numbering, no quotes, no explanations.\n"
+"\n"
+"NAMES:\n",
+        p->faction, p->faction, p->ideology, p->adjectives,
+        *CurrentMissionYear,
+        n_examples ? example_list : "(none yet)",
+        CH_POOL_SIZE,
+        sea ? "undersea platforms" : "land bases",
+        CH_NAME_MAX_LEN, CH_POOL_SIZE);
+
+    /*
+    Twelve short names is well under 200 tokens; the ceiling is only here so a
+    model that starts explaining itself cannot hold the turn loop open.
+    */
+    static char reply[4096];
+    chiron_trace("base: refilling pool for %s (%s)\n",
+        MFactions[faction_id].filename, sea ? "sea" : "land");
+    if (!http_generate(prompt, reply, sizeof(reply), 200)) {
+        ch_log("[base] generation failed for %s, using vanilla names\n",
+            MFactions[faction_id].filename);
+        name_pool_dead[faction_id][sea] = true;
+        return;
+    }
+    strip_preamble(reply);
+
+    int count = 0;
+    for (char* s = reply; *s && count < CH_POOL_SIZE; ) {
+        char* nl = strchr(s, '\n');
+        if (nl) {
+            *nl = '\0';
+        }
+        char cand[MaxBaseNameLen];
+        if (parse_name_line(s, cand)) {
+            bool dup = name_in_use(cand);
+            for (int i = 0; i < count && !dup; i++) {
+                dup = !_stricmp(name_pool[faction_id][sea][i], cand);
+            }
+            // Handing an example straight back is not a new name.
+            for (int i = 0; i < n_examples && !dup; i++) {
+                dup = !_stricmp(examples[i], cand);
+            }
+            if (!dup) {
+                strcpy_n(name_pool[faction_id][sea][count], MaxBaseNameLen, cand);
+                count++;
+            }
+        }
+        if (!nl) {
+            break;
+        }
+        s = nl + 1;
+    }
+    name_pool_count[faction_id][sea] = count;
+    ch_log("[base] %s pool (%s): %d names\n",
+        MFactions[faction_id].filename, sea ? "sea" : "land", count);
+    if (!count) {
+        name_pool_dead[faction_id][sea] = true;
+    }
+}
+
+bool chiron_name_base(int faction_id, char* name, bool sea_base) {
+    chiron_ensure_init();
+    if (!chiron_conf.enabled || !chiron_conf.base_names) {
+        return false;
+    }
+    if (faction_id < 1 || faction_id >= MaxPlayerNum) {
+        return false;
+    }
+    int sea = sea_base ? 1 : 0;
+    if (name_pool_dead[faction_id][sea]) {
+        return false;
+    }
+    // Drain what we have, refill once, drain again; then give up to vanilla.
+    for (int attempt = 0; attempt < 2; attempt++) {
+        while (name_pool_count[faction_id][sea] > 0) {
+            const char* cand =
+                name_pool[faction_id][sea][--name_pool_count[faction_id][sea]];
+            if (!name_in_use(cand)) {
+                strcpy_n(name, MaxBaseNameLen, cand);
+                ch_log("[base] %s named %s\n",
+                    MFactions[faction_id].filename, name);
+                return true;
+            }
+        }
+        if (attempt == 0) {
+            refill_name_pool(faction_id, sea);
+            if (name_pool_dead[faction_id][sea]) {
+                return false;
+            }
+        }
+    }
+    return false;
+}
+
 static bool chiron_ready = false;
 
 /*
@@ -1469,6 +1795,7 @@ static void chiron_ensure_init() {
     */
     chiron_conf.max_tokens = 110;
     chiron_conf.cache_size = 64;
+    chiron_conf.base_names = 1;
     chiron_conf.debug = 0;
 
     if (FILE* f = fopen("chiron.ini", "rt")) {
@@ -1487,6 +1814,7 @@ static void chiron_ensure_init() {
             else if (!_stricmp(key, "host"))        strcpy_n(chiron_conf.host, sizeof(chiron_conf.host), val);
             else if (!_stricmp(key, "timeout_ms"))  chiron_conf.timeout_ms = atoi(val);
             else if (!_stricmp(key, "max_tokens"))  chiron_conf.max_tokens = atoi(val);
+            else if (!_stricmp(key, "base_names"))  chiron_conf.base_names = atoi(val);
             else if (!_stricmp(key, "debug"))       chiron_conf.debug = atoi(val);
         }
         fclose(f);
