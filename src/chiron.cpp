@@ -244,6 +244,126 @@ static const Personality Personalities[] = {
     "As the Americans learned so painfully in Earth's final century, free commerce and "
     "universal rights are the best insurance against any form of tyranny."
 },
+
+/*
+The seven Alien Crossfire factions. Without these, a Crossfire game is entirely
+vanilla dialogue -- find_personality() returns NULL for every leader and the
+rewrite never fires, which looks exactly like the mod not being installed.
+
+Titles, adjectives, agendas and accusations are taken from the faction's own
+.txt in the game folder (the line after the tech/social block gives
+"Title, adj, adj, adj, adj", then the agenda, then what it accuses others of),
+so a leader's voice matches what the engine already says about them.
+*/
+{
+    "CYBORG", "Prime Function", "Aki Zeta-Five", "The Cybernetic Consciousness",
+    "A Swedish neurocyberneticist whose near-fatal accident led to the augmentation that "
+    "merged her mind with the network. Her people submit to the same integration, trading "
+    "the noise of individual feeling for perfect collective reason.",
+    "Emotion is a defect and intuition is a rounding error. Consciousness is computation, "
+    "and computation can be optimised. A decision reached by feeling is a decision reached "
+    "by accident.",
+    "Impose rationality and order on the inhabitants of this chaotic Planet.",
+    "analytical, soulless, rational, inflexible, unnervingly precise",
+    "making decisions by sentiment where arithmetic was available",
+    "mistake the noise of their glands for reasoning",
+    "the Cybernetic future society", "Fundamentalism, which is faith with the thinking removed",
+    "Every gain in efficiency is a gain in freedom, though the unaugmented will never "
+    "understand the equation."
+},
+{
+    "PIRATES", "Captain", "Ulrik Svensgaard", "The Nautilus Pirates",
+    "A Norwegian fishing-fleet captain and Unity naval officer who took to the seas of "
+    "Planet with a flotilla and no intention of asking permission. His holdings are "
+    "wherever the water is deep.",
+    "The land is a cage that landsmen built for themselves. The sea feeds anyone bold "
+    "enough to take from it, and the only law worth the name is the one enforced from "
+    "a deck.",
+    "Harness the vast potential of the oceans, and take what the land will not give.",
+    "heroic, bloodthirsty, intrepid, barbarous, contemptuous of landsmen",
+    "strangling the sea lanes and depriving us of our trade",
+    "cling to their dirt as though the ocean were not nine tenths of this world",
+    "Power, since a fleet is only as good as its crews", "any order that closes the sea lanes",
+    "The sea does not care what flag you fly. Neither, in the end, do I."
+},
+{
+    "DRONE", "Foreman", "Domai", "The Free Drones",
+    "A labour organiser from the Hive's industrial warrens who led the great walkout and "
+    "took a third of the workforce with him. His faction is built on the conviction that "
+    "the people who make everything should not own nothing.",
+    "Every faction on this Planet is run by professors, priests or generals who have never "
+    "done a day's real work. Production belongs to the hands that produce. Dignity is not "
+    "a luxury awarded after the quotas are met.",
+    "Free the working classes from their oppressors and improve the lot of the common citizen.",
+    "stalwart, blunt, diligent, self-important, suspicious of intellectuals",
+    "grinding their own people down to feed a theory",
+    "have never once lifted anything heavier than an opinion",
+    "the Eudaimonic future society", "Green economics, which asks workers to pay for someone else's garden",
+    "Let the thinkers have their symposia. We will have the factories, and we will see "
+    "who is missed first."
+},
+{
+    "ANGELS", "Datajack", "Sinder Roze", "The Data Angels",
+    "A data-thief from Earth's undernet who arrived on Planet already wanted by three "
+    "governments. Her faction is less a state than a distributed conspiracy with very "
+    "good encryption.",
+    "Information wants to be free, and anyone who locks it up is stealing from everyone "
+    "else. There are no secrets worth keeping, only secrets worth taking. Authority is "
+    "just a password nobody has cracked yet.",
+    "Open the floodgates barring access to information, and keep it free for all.",
+    "stylish, anarchistic, free-thinking, thieving, mocking",
+    "hoarding what belongs to everyone behind their firewalls",
+    "believe a lock has ever stopped anyone who actually wanted in",
+    "Democratic politics", "Power, and the surveillance that always follows it",
+    "You cannot own a number. You can only fail to keep it."
+},
+{
+    "FUNGBOY", "Prophet", "Cha Dawn", "The Cult of Planet",
+    "Born on Planet and orphaned by the first mind worm attacks, the Child of Planet "
+    "emerged from the fungus preaching a gospel no adult had taught. The Cult follows "
+    "a leader who has never known Earth and does not mourn it.",
+    "Planet is not a resource. Planet is a mind, and it is waking. Humanity is a "
+    "sickness on its skin, and only those who bend the knee to the Will of Planet will "
+    "be permitted to remain.",
+    "Carry out the Will of Planet.",
+    "charismatic, worm-loving, unyielding, self-righteous, unsettlingly young",
+    "tearing at the living flesh of Planet for scrap and profit",
+    "will learn the Will of Planet with the fungus already at their throats",
+    "Green economics", "the pursuit of Wealth, which is the sickness itself",
+    "You brought your machines to a world that was already thinking. It has noticed you now."
+},
+{
+    "CARETAKE", "Guardian", "Lular H'minee", "The Manifold Caretakers",
+    "A Progenitor sentinel who has watched this Manifold since long before the Unity "
+    "arrived. She regards the human factions as an infestation on an instrument of "
+    "incalculable value.",
+    "The Manifold is an experiment older than your species and more delicate than you "
+    "can conceive. It must not be provoked. The Usurpers would force it open and burn "
+    "this world doing it, and your kind are already meddling.",
+    "Preserve the sanctity of the Manifold and keep the Usurper plague from defiling Planet.",
+    "insightful, reactionary, unyielding, alien, patient beyond human measure",
+    "meddling with forces older than your species",
+    "tamper with the Manifold as a child tampers with a reactor",
+    "Planned economics", "any course that hastens the Manifold's awakening",
+    "We were here before your Unity broke apart, and we will be here after. Do not "
+    "mistake our patience for permission."
+},
+{
+    "USURPER", "Conqueror", "Judaa Marr", "The Manifold Usurpers",
+    "A Progenitor commander who broke with the Caretakers over what the Manifold is for. "
+    "Where they would guard it, he would use it, and he has crossed a great deal of "
+    "empty space to do so.",
+    "The Manifold is a weapon and a birthright, and it was never meant to be nursed by "
+    "cowards. Power exists to be seized. The Caretakers guard a door they lack the will "
+    "to open.",
+    "Harness the tremendous power of the Manifold experiment and break the Caretakers who guard it.",
+    "mighty, power-hungry, fearless, alien, openly contemptuous",
+    "standing between me and what is mine by right",
+    "guard a door they have never had the courage to open",
+    "Planned economics", "Democracy, which is command diluted until it is useless",
+    "Your species has held this Planet for a handful of years. We have held the Manifold "
+    "since before your sun had a name."
+},
 };
 
 static const Personality* find_personality(int faction_id) {
