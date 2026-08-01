@@ -78,6 +78,8 @@ static int listener_faction = -1;  // who it is talking to (usually the player)
 #define CH_GEN_FILE  "chiron_gen.txt"
 
 static void chiron_ensure_init();
+// Compares a filename ignoring an optional .txt suffix; defined below.
+static bool name_is(const char* filename, const char* base);
 
 void chiron_trace(const char* fmt, ...) {
     // Bounded so a hot path cannot fill the disk if a trace call is left in.
@@ -381,10 +383,59 @@ static const Personality* find_personality(int faction_id) {
 
 // ── plumbing ───────────────────────────────────────────────────────────────
 
+static int caption_a = -1;
+static int caption_b = -1;
+
 void chiron_set_speakers(int faction1, int faction2) {
     chiron_ensure_init();
-    speaker_faction = faction1;
-    listener_faction = faction2;
+    /*
+    Record both sides rather than assuming which is which. The engine's
+    convention here is not obvious -- mod_energy_trade(faction1, faction2) sets
+    *diplo_second_faction = faction2, implying faction1 is the player -- so
+    resolve_speaker() picks whichever side is not us and has a bible.
+    */
+    caption_a = faction1;
+    caption_b = faction2;
+    chiron_trace("caption: %d / %d\n", faction1, faction2);
+}
+
+// A faction's own dialogue file (fungboy.txt, usurper.txt, ...) names its owner.
+static int faction_file_owner(const char* filename) {
+    for (int i = 1; i < MaxPlayerNum; i++) {
+        const char* f = MFactions[i].filename;
+        if (f && *f && name_is(filename, f)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/*
+Who is doing the talking.
+
+mod_diplomacy_caption is patched in at patch.cpp:784, but it is a call-site
+patch and does not fire for every dialogue -- a Usurpers game logged
+"TRADETECH0 -- no bible for faction -1", meaning the text was read before any
+caption was built. So the caption is one source among several, not the source.
+*/
+static int resolve_speaker(const char* filename) {
+    int player = MapWin ? MapWin->cOwner : 0;
+
+    int owner = faction_file_owner(filename);
+    if (owner > 0 && find_personality(owner)) {
+        return owner;
+    }
+    if (caption_b != player && find_personality(caption_b)) {
+        return caption_b;
+    }
+    if (caption_a != player && find_personality(caption_a)) {
+        return caption_a;
+    }
+    int partner = *diplo_second_faction;
+    if (partner != player && find_personality(partner)) {
+        return partner;
+    }
+    return -1;
 }
 
 /*
@@ -469,16 +520,23 @@ bool chiron_should_rewrite(const char* filename, const char* label) {
     worth recording. A silent miss here looks exactly like the mod not being
     installed, which is the most expensive failure mode this thing has.
     */
-    if (!is_speech_file(filename)) {
+    // A faction's own .txt carries its speech too, so it counts as a speech file.
+    if (!is_speech_file(filename) && faction_file_owner(filename) < 0) {
         chiron_trace("skip: %s / %s -- not a speech file\n", filename, label);
         return false;
     }
-    const Personality* p = find_personality(speaker_faction);
+    int speaker = resolve_speaker(filename);
+    const Personality* p = find_personality(speaker);
     if (!p) {
-        chiron_trace("skip: %s -- no bible for faction %d\n", label, speaker_faction);
+        chiron_trace("skip: %s / %s -- no speaker (caption %d/%d, diplo2 %d, file %d)\n",
+            filename, label, caption_a, caption_b,
+            *diplo_second_faction, faction_file_owner(filename));
         return false;
     }
-    chiron_trace("hook: rewriting %s (speaker=%d %s)\n", label, speaker_faction, p->leader);
+    speaker_faction = speaker;                       // chiron_rewrite_block reads this
+    listener_faction = MapWin ? MapWin->cOwner : 0;
+    chiron_trace("hook: rewriting %s / %s (speaker=%d %s)\n",
+        filename, label, speaker, p->leader);
     return true;
 }
 
