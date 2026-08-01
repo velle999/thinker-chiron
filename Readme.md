@@ -1,4 +1,36 @@
 
+> ## This is the Chiron Rising fork
+>
+> You are on branch **`chiron`**, a fork of
+> [induktio/thinker](https://github.com/induktio/thinker) carrying an LLM
+> diplomacy layer: faction leaders speak lines written on the spot by a local
+> model, bases are named from each faction's culture, and `Alt+N` prints an
+> in-fiction dispatch on the state of Planet.
+>
+> **This repo is the DLL source only, and does not install on its own.** The mod
+> pack — installer, model bridge, config and the full documentation — lives at
+> [**velle999/chiron-smacx**](https://github.com/velle999/chiron-smacx). Start
+> there:
+>
+> ```bash
+> git clone https://github.com/velle999/chiron-smacx
+> git clone -b chiron https://github.com/velle999/thinker-chiron \
+>     chiron-smacx/thinker-chiron
+> cd chiron-smacx && ./install.sh
+> ```
+>
+> All Chiron code is in `src/chiron.{h,cpp}`, plus small hooks in `game.cpp`
+> (base naming), `gui.cpp` (the `Alt+N` key) and `config.cpp`. Upstream history
+> is kept intact so this branch can rebase onto induktio.
+>
+> **Build note:** Thinker must be built against **msvcrt**. A distro toolchain
+> that defaults to UCRT produces a DLL that loads and then kills the game at
+> startup with *"Unable to allocate draw-buffer"*. See
+> [`docs/toolchain.md`](https://github.com/velle999/chiron-smacx/blob/main/docs/toolchain.md)
+> in the pack.
+>
+> Upstream's own readme follows.
+
 SMACX Thinker Mod
 =================
 
