@@ -610,6 +610,57 @@ static void flatten_conditionals(char* s) {
     *w = '\0';
 }
 
+/*
+Resolve the engine's placeholders before the model ever sees the line.
+
+A script line is a template, not a sentence. METFRIEND2 reads
+
+    $NAME3 has become quite obsessed with $<3:his:her:x:x> $PETPROJECTS5
+
+and the engine fills that in as it draws -- "Cha Dawn has become quite obsessed
+with his rapport with Planet", the pet project coming from fungboy.txt. Handed
+the template, the model is rewriting a sentence whose ending it cannot see. It
+returned "He's taken quite a liking to his $PETPROJECTS5", which is a fair
+paraphrase of "obsessed with <something he owns>" and reads as nonsense the
+moment the engine supplies the words: he has taken a liking to his own rapport.
+
+So substitute first and let the reply carry finished words. parse_string
+(0x625880) is the engine's own substitution, the same call the display path
+makes on every line it draws (veh_action.cpp:1908) -- so what we send is
+character-for-character what the player would have read, with the conditionals
+picking the right gender rather than flatten_conditionals guessing "his".
+
+It also retires a whole class of failure. With no placeholders in the prompt
+there are none for the model to drop, so the mandatory-token check that binned
+one generation in twelve has nothing left to bin; what must survive is now the
+VALUE, which is a word the model has a reason to keep.
+
+The parse slots are populated by the time we are called: the caller fills them
+with parse_says/parse_num and then opens the popup, and opening the popup is
+what reaches our hook.
+*/
+static void resolve_line(const char* src, char* dst, size_t dst_len) {
+    // parse_string takes a mutable source, as the engine calls it on its own
+    // line buffer; and it appends, so the destination starts empty.
+    char in[CH_LINE_LEN];
+    strcpy_n(in, sizeof(in), src);
+    char buf[StrBufLen * 2] = {};
+    parse_string(in, buf);
+    // Nothing came back: keep the template rather than send an empty line.
+    strcpy_n(dst, dst_len, buf[0] ? buf : src);
+}
+
+// What one placeholder stands for right now, or "" if the engine has no value.
+static void resolve_token(const char* name, char* dst, size_t dst_len) {
+    char expr[80];
+    snprintf(expr, sizeof(expr), "$%s", name);
+    resolve_line(expr, dst, dst_len);
+    // An unknown token comes back as itself, which is not a value.
+    if (dst[0] == '$') {
+        dst[0] = '\0';
+    }
+}
+
 static int collect_tokens(const char* text, char tokens[][64], int max_tokens) {
     int count = 0;
     for (const char* p = text; *p && count < max_tokens; p++) {
@@ -1398,36 +1449,33 @@ static void build_dossier(int speaker, int listener, char* out, size_t out_len) 
 
 static void build_prompt(const Personality* p, const char* prose,
                          char tokens[][64], int token_count,
+                         const char must[][StrBufLen], int must_count,
                          char* out, size_t out_len) {
-    char token_list[1024] = {};
-    for (int i = 0; i < token_count; i++) {
-        size_t used = strlen(token_list);
-        snprintf(token_list + used, sizeof(token_list) - used,
-                 "%s$%s", i ? ", " : "", tokens[i]);
-    }
-
     /*
-    The tokens whose loss actually discards the reply, repeated at the very end.
+    The values whose loss actually discards the reply, repeated at the very end.
 
-    Listing them once among eight rules was not enough: the model writes "your
-    data on that technology" instead of "$TECH0", and the whole generation is
-    then thrown away for vanilla. Since the close of the prompt is what it
-    weighs most -- the same effect that made a trailing "Phrasing 3:" rule
-    produce a list of phrasings -- the reminder goes last, immediately before
-    the cue to speak. Measured over 12 generations: 9/12 kept, then 11/12.
+    Listing the requirement once among eight rules was not enough: the model
+    wrote "your data on that technology" where the line named a tech, and the
+    whole generation was thrown away for vanilla. Since the close of the prompt
+    is what it weighs most -- the same effect that made a trailing "Phrasing 3:"
+    rule produce a list of phrasings -- the reminder goes last, immediately
+    before the cue to speak. Measured over 12 generations: 9/12 kept, then 11/12.
 
-    Cosmetic tokens stay out of it. $NAME and $TITLE are dropped constantly and
-    on purpose, and crowding them in here would blunt the one instruction that
+    These used to be placeholders, and asking for "$TECH0" verbatim was asking
+    the model to copy a string it could attach no meaning to. Now the prose is
+    resolved before it is sent, so what has to survive is the tech's name and
+    the number of credits -- words that mean something in the sentence they sit
+    in, and are correspondingly easier to keep.
+
+    Cosmetic values stay out of it. A leader may reword their way around a
+    faction's title, and crowding the list would blunt the one instruction that
     has to land.
     */
     char must_list[512] = {};
-    for (int i = 0; i < token_count; i++) {
-        if (is_cosmetic_token(tokens[i])) {
-            continue;
-        }
+    for (int i = 0; i < must_count; i++) {
         size_t used = strlen(must_list);
         snprintf(must_list + used, sizeof(must_list) - used,
-                 "%s$%s", used ? ", " : "", tokens[i]);
+                 "%s%s", used ? ", " : "", must[i]);
     }
     char must_line[640] = {};
     if (must_list[0]) {
@@ -1437,23 +1485,23 @@ static void build_prompt(const Personality* p, const char* prose,
     }
 
     /*
-    Name the PERSON being spoken to, but ONLY when the line has no placeholder
-    that already does it.
+    Name the PERSON being spoken to, but ONLY when the line does not already.
 
-    Most blocks say "$TITLE0 $NAME1" and the engine renders that as "Prime
-    Function Aki Zeta-5" -- correctly, and with the right honorific for the
-    faction. Those are cosmetic, so the model MAY drop them, and it mostly does
-    not: asked to rewrite such a line it kept both placeholders in 3 of 3 runs.
+    Most blocks say "$TITLE0 $NAME1", which now reaches the model resolved --
+    "Prime Function Aki Zeta-5", spelled by the engine with the right honorific
+    for the faction. Stating it a second time in the header is how "Aki
+    Zeta-five" and "Cybernetic Consciousness's Aki Zeta-5" got generated back
+    when the name was passed alongside the placeholder: given the same person
+    twice, the model writes its own spelling of them.
 
-    Handing it the literal name as well makes it worse, not better. It stops
-    using the placeholders and writes the name itself, which is how "Aki
-    Zeta-five" and "Cybernetic Consciousness's Aki Zeta-5" got generated in
-    testing -- the engine would have spelled it correctly every time.
-
-    But a block with NO name placeholder at all (#DIPLO is one) leaves the model
-    nothing to address them by except the faction, and it duly greeted the player
-    as "Cybernetic Consciousness" -- which reads like addressing someone by their
+    But a block that names nobody (#DIPLO is one) leaves the model nothing to
+    address them by except the faction, and it duly greeted the player as
+    "Cybernetic Consciousness" -- which reads like addressing someone by their
     employer. So the person's name goes in exactly there, and nowhere else.
+
+    The test is still the token list, collected from the block before it was
+    resolved: it says whether the sentence names them, which is the question,
+    and it survives resolution turning the answer into ordinary words.
     */
     bool has_name_token = false;
     for (int i = 0; i < token_count && !has_name_token; i++) {
@@ -1518,10 +1566,13 @@ looking like a list that wants finishing.
 "MESSAGE:\n%s\n"
 "\n"
 "RULES:\n"
-"- Keep these verbatim, including the $: %s\n"
-"- $TITLE1 $NAME2 stay together in that order. Invent no new $placeholders.\n"
-"- Drop a placeholder only together with the words around it, so no dangling "
-"phrase is left behind.\n"
+/*
+The prose is resolved now, so there is nothing to echo and nothing to preserve
+in place -- but the model has seen enough $TOKENs in its training data to write
+one unprompted, and a stray "$NUM0" in the reply would reach the engine's own
+substitution on the way to the screen and render as whatever slot 0 holds.
+*/
+"- Write no $ signs and no placeholder names. The words above are final.\n"
 "- At most 3 sentences, and shorter than the message above.\n"
 "- Say it once. Do not restate the same point in other words.\n"
 /*
@@ -1550,7 +1601,6 @@ names.
         dossier,
         variation_counter(),
         prose,
-        token_count ? token_list : "(none)",
         must_line);
 }
 
@@ -1698,20 +1748,71 @@ FILE* chiron_rewrite_block(FILE* src, const char* label) {
         return NULL;
     }
 
-    char prose[4096] = {};
+    /*
+    Tokens are collected from the block as it shipped, before resolution wipes
+    them out. They are what says which parts of the line the player is deciding
+    on -- a tech name is a decision, an honorific is not -- and that is not
+    recoverable from the finished words.
+    */
+    char raw[4096] = {};
     for (int i = body_start; i < body_end; i++) {
-        size_t used = strlen(prose);
-        snprintf(prose + used, sizeof(prose) - used, "%s%s", used ? "\n" : "", lines[i]);
+        size_t used = strlen(raw);
+        snprintf(raw + used, sizeof(raw) - used, "%s%s", used ? "\n" : "", lines[i]);
     }
-
-    // Before tokens are collected, so no conditional is ever offered as one.
-    flatten_conditionals(prose);
+    flatten_conditionals(raw);
 
     char tokens[32][64];
-    int token_count = collect_tokens(prose, tokens, 32);
+    int token_count = collect_tokens(raw, tokens, 32);
+
+    // What the player would have read, which is what the model rewrites.
+    char prose[4096] = {};
+    for (int i = body_start; i < body_end; i++) {
+        char resolved[CH_LINE_LEN];
+        resolve_line(lines[i], resolved, sizeof(resolved));
+        size_t used = strlen(prose);
+        snprintf(prose + used, sizeof(prose) - used, "%s%s", used ? "\n" : "", resolved);
+    }
+    // A conditional the engine declined to expand must not reach the model.
+    flatten_conditionals(prose);
+
+    /*
+    Trace the resolved body, because the one thing that cannot be checked
+    outside the game is whether the parse slots held anything when we asked.
+    A "$" surviving here, or a name where a number belongs, says the values
+    were not ready at hook time -- and that would be invisible in the reply,
+    which would simply read as though the model had invented the details.
+    */
+    chiron_trace("rw: resolved body:\n%s\n", prose);
+
+    /*
+    The values the reply has to carry, resolved the same way. A block naming
+    two techs and a price yields three; most yield none, and then nothing is
+    demanded of the reply at all.
+    */
+    char must[8][StrBufLen];
+    int must_count = 0;
+    for (int i = 0; i < token_count && must_count < 8; i++) {
+        if (is_cosmetic_token(tokens[i])) {
+            continue;
+        }
+        char val[StrBufLen];
+        resolve_token(tokens[i], val, sizeof(val));
+        strtrail(val);
+        if (!val[0]) {
+            continue;
+        }
+        bool dup = false;
+        for (int j = 0; j < must_count && !dup; j++) {
+            dup = !strcmp(must[j], val);
+        }
+        if (!dup) {
+            strcpy_n(must[must_count++], StrBufLen, val);
+        }
+    }
 
     static char prompt[8192];
-    build_prompt(p, prose, tokens, token_count, prompt, sizeof(prompt));
+    build_prompt(p, prose, tokens, token_count, must, must_count,
+                 prompt, sizeof(prompt));
 
     static char generated[4096];
     chiron_trace("rw: prompt built (%d bytes), calling bridge\n", (int)strlen(prompt));
@@ -1726,23 +1827,24 @@ FILE* chiron_rewrite_block(FILE* src, const char* label) {
     strip_preamble(generated);
     // Safety net: a conditional invented despite never being shown one.
     flatten_conditionals(generated);
-    scrub_unknown_tokens(generated, tokens, token_count);
-    // Before the placeholder check, so a token only trimming removes is caught.
+    /*
+    An empty allowlist, so every placeholder goes. The model was shown none and
+    asked for none, but one it invents would be substituted by the engine on its
+    way to the screen -- a "$NUM0" written for flavour would come out as the
+    price of something else entirely.
+    */
+    scrub_unknown_tokens(generated, tokens, 0);
+    // Before the value check, so a word that only trimming removes is caught.
     tidy_reply(generated);
 
     /*
-    Every data-carrying placeholder must survive. Losing $TECH0 or $NUM0 would
-    leave the player agreeing to a blank, so a reply that drops one is discarded
-    in favour of the line the game shipped.
+    Every value the player is deciding on must survive. Losing the tech's name
+    or the number of credits would leave them agreeing to a blank, so a reply
+    that drops one is discarded in favour of the line the game shipped.
     */
-    for (int i = 0; i < token_count; i++) {
-        if (is_cosmetic_token(tokens[i])) {
-            continue;
-        }
-        char needle[66];
-        snprintf(needle, sizeof(needle), "$%s", tokens[i]);
-        if (!strstr(generated, needle)) {
-            ch_log("[%s] dropped placeholder %s, using vanilla\n", label, needle);
+    for (int i = 0; i < must_count; i++) {
+        if (!find_nocase(generated, must[i])) {
+            ch_log("[%s] dropped \"%s\", using vanilla\n", label, must[i]);
             return NULL;
         }
     }
@@ -1790,21 +1892,22 @@ FILE* chiron_rewrite_block(FILE* src, const char* label) {
         return NULL;
     }
     /*
-    Report how many placeholders actually SURVIVED, not how many the vanilla
-    line had. This said "3 placeholders preserved" for a reply that had dropped
-    one of the three, because it logged token_count -- the collected total -- so
-    the log positively asserted the thing that had gone wrong was fine.
+    Name the values that had to survive, rather than count them.
+
+    A count here once asserted the thing that was broken: "3 placeholders
+    preserved" for a reply that had dropped one of the three, because it logged
+    the collected total instead of the survivors. Anything reaching this line
+    has already passed the check above, so a count would now be a tautology --
+    what is worth knowing from the log is which words were at stake, since that
+    is what tells you whether resolution found the right ones.
     */
-    int kept = 0;
-    for (int i = 0; i < token_count; i++) {
-        char needle[66];
-        snprintf(needle, sizeof(needle), "$%s", tokens[i]);
-        if (strstr(generated, needle)) {
-            kept++;
-        }
+    char kept[512] = {};
+    for (int i = 0; i < must_count; i++) {
+        size_t used = strlen(kept);
+        snprintf(kept + used, sizeof(kept) - used, "%s%s", used ? ", " : "", must[i]);
     }
-    ch_log("[%s] rewritten as %s (%d/%d placeholders kept)\n",
-        label, p->leader, kept, token_count);
+    ch_log("[%s] rewritten as %s (carries: %s)\n",
+        label, p->leader, must_count ? kept : "nothing to preserve");
     return gen;
 }
 
