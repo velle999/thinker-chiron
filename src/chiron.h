@@ -67,3 +67,9 @@ header of the rewritten block. Returns NULL to mean "use the vanilla block" --
 src is left untouched and still usable in that case.
 */
 FILE* chiron_rewrite_block(FILE* src, const char* label);
+
+// The file chiron_rewrite_block() writes the replacement block into.
+#define CH_GEN_FILE "chiron_gen.txt"
+
+// Engine address that asked for the current lookup; set by the text_open hook.
+extern void* chiron_last_caller;

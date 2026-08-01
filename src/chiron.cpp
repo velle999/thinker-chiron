@@ -79,16 +79,18 @@ static int listener_faction = -1;  // who it is talking to (usually the player)
 
 #define CH_MAX_LINES 64
 #define CH_LINE_LEN  512
-#define CH_GEN_FILE  "chiron_gen.txt"
+// CH_GEN_FILE lives in chiron.h -- config.cpp reopens it through the engine.
 
 static void chiron_ensure_init();
 // Compares a filename ignoring an optional .txt suffix; defined below.
 static bool name_is(const char* filename, const char* base);
 
+void* chiron_last_caller = NULL;
+
 void chiron_trace(const char* fmt, ...) {
     // Bounded so a hot path cannot fill the disk if a trace call is left in.
     static int lines = 0;
-    if (lines >= 500) {
+    if (lines >= 4000) {
         return;
     }
     lines++;
@@ -115,19 +117,14 @@ static void ch_log(const char* fmt, ...) {
 }
 
 /*
-Diplomacy labels are built by the engine as a prefix plus a variant digit
-(clear(); says("DEMANDTECH"); say_num(n)), so we match on prefix. This list is
-deliberately limited to faction-to-faction speech -- combat results, probe
-outcomes and event popups keep their original text.
+There is deliberately no label list any more.
+
+Speech used to be recognised by a prefix table of 25 diplomacy labels, which
+reached 84 of Script.txt's 468 quoted-speech blocks. What a leader says is
+decided structurally instead -- see chiron_should_rewrite and the control-line
+test in chiron_rewrite_block -- which takes it to 503 of 1572 blocks while
+skipping all 107 menus.
 */
-static const char* DiplomacyLabels[] = {
-    "DEMANDTECH", "DEMANDBRIBE", "DEMANDATTACK", "DEMANDWITHDRAWAL",
-    "ASKFORLOAN", "OFFERTREATY", "FACTIONTREATY", "FACTIONTRUCE",
-    "WANTTOTRUCE", "BREAKINGPACT", "BREAKINGTREATY", "BREAKINGTRUCE",
-    "BEGINVENDETTA", "VENDETTA", "ATROCIOUS", "GENETICWARFARE",
-    "BULLY", "WRONGED", "METFRIEND", "METALIEN", "KEPTPACT",
-    "TRADETECH", "GIVETECH", "PACTOFFER", "SURRENDER",
-};
 
 // ── faction character bibles, ported from Chiron's factionPersonalities.ts ──
 
@@ -502,22 +499,34 @@ bool chiron_should_rewrite(const char* filename, const char* label) {
     file and label carry faction speech has been wrong twice; this records it.
     Drop the cap to 0 once the mod is known good -- it is pure diagnostics.
     */
-    static int sampled = 0;
-    if (sampled < 60) {
-        sampled++;
-        chiron_trace("seen: %s / %s\n", filename, label);
-    }
+    /*
+    Every lookup is traced, unfiltered.
 
-    bool diplomacy = false;
-    for (auto& prefix : DiplomacyLabels) {
-        if (!_strnicmp(label, prefix, strlen(prefix))) {
-            diplomacy = true;
-            break;
-        }
-    }
-    if (!diplomacy) {
-        return false;
-    }
+    X_text_open (0x5BECA0) can route one label through text_open twice -- first
+    at the speaking faction's own script (*0x691b20), and only if that misses at
+    the base script. Filtering the trace to the files we recognise as speech hid
+    the faction attempt entirely, and filtering it to a fixed sample hid
+    everything after startup. Both made the trace go quiet at exactly the point
+    under investigation. Keep this unfiltered until the popup's real read
+    sequence is known; chiron_trace's own line cap is the only limit.
+    */
+    chiron_trace("lookup: %s / %s (caller %p)\n", filename, label,
+        chiron_last_caller);
+
+    /*
+    Any block a faction leader speaks is fair game, not a hand-listed few.
+
+    This used to gate on a list of 25 label prefixes, which covered 84 of the 468
+    quoted-speech blocks in Script.txt -- 18%. Everything else stayed vanilla, so
+    most of what a leader says was still the same handful of recycled lines and
+    the mod looked dead even when it was working. A single conversation turned up
+    six uncovered labels (BETRAYFRIEND, PROTORIVAL, INTRO3, REBUFFEDTREATY...).
+
+    The gate is now structural instead: the file has to carry faction speech and
+    a leader has to be resolvable as the speaker. Whether the block is really
+    speech rather than a menu needs the block's own text, so that test lives in
+    chiron_rewrite_block, which has it.
+    */
 
     /*
     Past this point the label IS faction speech, so anything that stops us is
@@ -559,6 +568,47 @@ substitutes these after load, so losing one silently drops the tech name, the
 credit amount, or the faction being discussed. If the model doesn't return them
 all, we discard its output.
 */
+/*
+Flatten the engine's conditionals before the model ever sees them.
+
+"$<2:his:her:x:x>" picks a pronoun from faction 2's gender and
+"$<M2:$FACTIONPEJ3>" gates a token on it. Shown this syntax in the original, a
+7B copies it and gets it wrong -- Lal shipped "your associates in <M2:>", which
+the engine rendered literally as junk in the popup. Requiring them verbatim is
+no better: that just sends every such block back to vanilla.
+
+So collapse each one to plain text first. "$<M2:$FACTIONPEJ3>" becomes the
+token it guards, anything else becomes its first alternative. The gendered
+variant is lost, which costs a "his" that might have been a "her"; a mangled
+"<M2:>" on screen costs more.
+*/
+static void flatten_conditionals(char* s) {
+    char* w = s;
+    for (const char* r = s; *r; ) {
+        if (r[0] != '$' || r[1] != '<') {
+            *w++ = *r++;
+            continue;
+        }
+        const char* end = strchr(r, '>');
+        if (!end) {
+            *w++ = *r++;
+            continue;
+        }
+        const char* colon = (const char*)memchr(r + 2, ':', (size_t)(end - (r + 2)));
+        const char* alt = colon ? colon + 1 : r + 2;
+        // Up to the next ':' is the first alternative, or the guarded token.
+        const char* stop = alt;
+        while (stop < end && *stop != ':') {
+            stop++;
+        }
+        while (alt < stop) {
+            *w++ = *alt++;
+        }
+        r = end + 1;
+    }
+    *w = '\0';
+}
+
 static int collect_tokens(const char* text, char tokens[][64], int max_tokens) {
     int count = 0;
     for (const char* p = text; *p && count < max_tokens; p++) {
@@ -567,8 +617,25 @@ static int collect_tokens(const char* text, char tokens[][64], int max_tokens) {
         }
         const char* start = p + 1;
         const char* q = start;
-        while (*q && (isalnum((unsigned char)*q) || *q == '_')) {
-            q++;
+        if (*start == '<') {
+            /*
+            An engine conditional, e.g. "$<2:his:her:x:x>" picks a pronoun from
+            faction 2's gender and "$<M2:$FACTIONPEJ3>" gates a whole token.
+            These carry meaning the prose depends on, they are not plain
+            placeholders, and the scanner below stops dead at the '<' -- so they
+            were never collected and the model was free to drop them. Take the
+            whole span up to '>' and treat it like any other mandatory token.
+            */
+            while (*q && *q != '>') {
+                q++;
+            }
+            if (*q == '>') {
+                q++;
+            }
+        } else {
+            while (*q && (isalnum((unsigned char)*q) || *q == '_')) {
+                q++;
+            }
         }
         if (q == start) {
             continue;
@@ -601,13 +668,37 @@ nothing else. Models reliably collapse "$TITLE1 $NAME2" to "$NAME2", and
 rejecting every such reply would mean never showing generated text at all, so
 these are treated as optional while everything carrying game data stays required.
 */
+/*
+Only tokens that carry data the player is deciding on are mandatory.
+
+This used to be the other way round -- everything was mandatory except $TITLE --
+and once the mod covered all 503 speech blocks instead of 84, that rejected
+nearly everything. $NAME alone appears in 290 of them, and the model naturally
+writes the person's name instead of echoing the placeholder, so every
+BETRAYFRIEND generated fine and was then thrown away: "dropped placeholder
+$NAME0, using vanilla", twice in a row, which is exactly the repetition this is
+supposed to remove. Losing $NAME costs an honorific. Losing $TECH0 or $NUM0
+leaves the player agreeing to a blank.
+
+An allowlist rather than a denylist, so an unrecognised token defaults to
+keeping the generation rather than discarding it.
+*/
+static const char* MandatoryTokens[] = {
+    "TECH", "NUM", "ENERGY", "CREDIT", "BASENAME", "PROJECT", "UNITTYPE",
+};
+
 static bool is_cosmetic_token(const char* name) {
-    if (_strnicmp(name, "TITLE", 5)) {
-        return false;
-    }
-    for (const char* p = name + 5; *p; p++) {
-        if (!isdigit((unsigned char)*p)) {
-            return false;
+    for (auto& stem : MandatoryTokens) {
+        size_t n = strlen(stem);
+        if (!_strnicmp(name, stem, n)) {
+            // Match the stem plus its variant digits, not a longer word.
+            const char* p = name + n;
+            while (*p && isdigit((unsigned char)*p)) {
+                p++;
+            }
+            if (!*p) {
+                return false;
+            }
         }
     }
     return true;
@@ -888,6 +979,22 @@ static bool http_generate(const char* prompt, char* out, size_t out_len) {
 
 // ── prompt construction (port of buildDiplomacyPrompt) ─────────────────────
 
+/*
+Make every prompt textually unique, so the same label twice is not the same line
+twice.
+
+synapd's wire protocol carries a token budget and nothing else -- there is no
+temperature on it -- and it samples greedily, so an identical prompt returns an
+identical reply. Going back to Lal produced byte-for-byte the same 691-byte
+response, which is precisely the "they always say the same thing" this mod
+exists to fix. The mission year and turn already vary and are real context; this
+counter covers two conversations inside one turn.
+*/
+static int variation_counter() {
+    static int n = 0;
+    return ++n;
+}
+
 static void build_prompt(const Personality* p, const char* prose,
                          char tokens[][64], int token_count,
                          char* out, size_t out_len) {
@@ -904,42 +1011,91 @@ static void build_prompt(const Personality* p, const char* prose,
     }
 
     snprintf(out, out_len,
-"You are %s %s, leader of %s on Planet, in the Alpha Centauri system.\n"
-"\n"
+/*
+Every byte here is paid on every popup, and the game is blocked the whole time.
+
+Measured against this box's synapd: a 212-byte prompt answers in 1.1s and a
+2592-byte one in 2.9s, with repeats identical -- so prompt evaluation is most of
+the pause and nothing is cached between calls. The persona below is the mod's
+whole payload and stays; the scaffolding around it does not need to be prose.
+*/
+"You are %s %s of %s on Planet.\n"
 "BACKGROUND: %s\n"
 "IDEOLOGY: %s\n"
-"YOUR GOAL: %s\n"
+"GOAL: %s\n"
 "YOU ARE: %s\n"
-"You accuse rivals of %s. You mock rivals by saying they %s.\n"
-"You favour %s. You refuse %s.\n"
-"A sample of your voice: \"%s\"\n"
+"You accuse rivals of %s; you mock them as those who %s.\n"
+"You favour %s and refuse %s.\n"
+"Your voice: \"%s\"\n"
+"Speaking to %s, mission year %d, turn %d.\n"
 "\n"
-"You are speaking to %s.\n"
+"Rewrite this message in your voice. Same meaning, same request, same outcome.\n"
+"MESSAGE:\n%s\n"
 "\n"
-"TASK: Rewrite the following diplomatic message in your own voice. Keep the "
-"exact same meaning, the same request or threat, and the same outcome -- only "
-"the wording and character should change.\n"
-"\n"
-"ORIGINAL MESSAGE:\n%s\n"
-"\n"
-"HARD RULES:\n"
-"- You MUST include every one of these placeholders verbatim, spelled exactly "
-"as shown, including the $: %s\n"
-"- Placeholders like $TITLE1 $NAME2 are an honorific followed by a name and "
-"must stay together as a pair, in that order.\n"
-"- Do not invent new $placeholders.\n"
-"- Keep it to at most 6 short lines. This is a dialogue box, not an essay.\n"
-"- Do not use quotation marks around the whole message.\n"
-"- Reply with ONLY the rewritten message. No preamble, no explanation.\n",
+"RULES:\n"
+"- Keep these verbatim, including the $: %s\n"
+"- $TITLE1 $NAME2 stay together in that order. Invent no new $placeholders.\n"
+"- Drop a placeholder only together with the words around it, so no dangling "
+"phrase is left behind.\n"
+"- ONE paragraph, 2-4 sentences, shorter than the original. No quotation marks "
+"anywhere.\n"
+"- Reply with only the message, no preamble.\n"
+"- Phrasing %d: word it differently than before.\n",
         p->title, p->leader, p->faction,
         p->background, p->ideology, p->goal, p->adjectives,
         p->accusation, p->mockery, p->preferred, p->aversion, p->blurb,
-        listener_name,
+        listener_name, *CurrentMissionYear, *CurrentTurn,
         prose,
-        token_count ? token_list : "(none)");
+        token_count ? token_list : "(none)",
+        variation_counter());
 }
 
 // ── the rewrite ────────────────────────────────────────────────────────────
+
+/*
+Emit one generated line hard-wrapped, the way the shipped script is written.
+
+Every line the engine has ever parsed is pre-wrapped by hand: across Script.txt,
+xscript and the two alien scripts the longest line is 106 characters, only 67 of
+Script.txt's ~10,800 lines pass 80, and the bulk sit at 60-70. The model returns
+a whole paragraph as a single line -- the DEMANDTECH10 rewrite was ~300
+characters -- which is three times anything the engine is built for, and #xs 440
+gives it a 440-pixel box with no wrapping of its own.
+
+Wrapping at 68 keeps us inside the shipped envelope. Breaks happen on spaces
+only, so a {$TECH0} placeholder is never split; a single word longer than the
+width goes out on its own line rather than being cut.
+*/
+#define CH_WRAP_COLS 68
+
+static void write_wrapped(FILE* out, const char* s) {
+    int col = 0;
+    while (*s) {
+        while (*s == ' ') {
+            s++;
+        }
+        const char* word = s;
+        while (*s && *s != ' ') {
+            s++;
+        }
+        int len = s - word;
+        if (!len) {
+            break;
+        }
+        if (col && col + 1 + len > CH_WRAP_COLS) {
+            fputc('\n', out);
+            col = 0;
+        } else if (col) {
+            fputc(' ', out);
+            col++;
+        }
+        fwrite(word, 1, (size_t)len, out);
+        col += len;
+    }
+    if (col) {
+        fputc('\n', out);
+    }
+}
 
 FILE* chiron_rewrite_block(FILE* src, const char* label) {
     const Personality* p = find_personality(speaker_faction);
@@ -980,6 +1136,23 @@ FILE* chiron_rewrite_block(FILE* src, const char* label) {
     while (body_start < line_count && is_control_line(lines[body_start])) {
         body_start++;
     }
+    /*
+    A block with no leading control lines is a menu, not speech.
+
+    Speech blocks open with "#xs" and "#caption" -- the popup geometry and the
+    portrait caption -- and the prose follows. A menu has neither and is just one
+    option per line: DIPLOMENU is the player's list of openers, DEMANDTECH11A the
+    four answers to a tech demand. Rewriting either turns a set of buttons into a
+    paragraph and leaves the player no way to reply.
+
+    This replaces an earlier rule that keyed off labels ending in a digit plus
+    one letter. That caught the "...11A" reply blocks but nothing else, and it
+    would have swallowed DIPLOMENU the moment the label gate came off.
+    */
+    if (body_start == 0) {
+        chiron_trace("rw: %s has no control lines -- menu, not speech\n", label);
+        return NULL;
+    }
     int body_end = body_start;
     while (body_end < line_count && lines[body_end][0] != '\0') {
         body_end++;
@@ -988,11 +1161,20 @@ FILE* chiron_rewrite_block(FILE* src, const char* label) {
         return NULL;
     }
 
+    // Narration in a speech file is not a leader talking; speech is quoted.
+    if (!strchr(lines[body_start], '"')) {
+        chiron_trace("rw: %s body is not quoted speech\n", label);
+        return NULL;
+    }
+
     char prose[4096] = {};
     for (int i = body_start; i < body_end; i++) {
         size_t used = strlen(prose);
         snprintf(prose + used, sizeof(prose) - used, "%s%s", used ? "\n" : "", lines[i]);
     }
+
+    // Before tokens are collected, so no conditional is ever offered as one.
+    flatten_conditionals(prose);
 
     char tokens[32][64];
     int token_count = collect_tokens(prose, tokens, 32);
@@ -1010,6 +1192,8 @@ FILE* chiron_rewrite_block(FILE* src, const char* label) {
     }
 
     strip_preamble(generated);
+    // Safety net: a conditional invented despite never being shown one.
+    flatten_conditionals(generated);
     scrub_unknown_tokens(generated, tokens, token_count);
 
     /*
@@ -1033,7 +1217,6 @@ FILE* chiron_rewrite_block(FILE* src, const char* label) {
         return NULL;
     }
 
-    // Write the rewritten block, preserving control lines and choice buttons.
     FILE* out = fopen(CH_GEN_FILE, "wt");
     if (!out) {
         return NULL;
@@ -1049,7 +1232,7 @@ FILE* chiron_rewrite_block(FILE* src, const char* label) {
         }
         strtrail(s);
         if (*s) {
-            fprintf(out, "%s\n", s);
+            write_wrapped(out, s);
         }
         if (!nl) {
             break;
@@ -1092,7 +1275,13 @@ static void chiron_ensure_init() {
     chiron_conf.port = 11436;
     strcpy_n(chiron_conf.host, sizeof(chiron_conf.host), "127.0.0.1");
     chiron_conf.timeout_ms = 8000;
-    chiron_conf.max_tokens = 320;
+    /*
+    A dialogue box holds at most 6 short lines, which is nowhere near 320
+    tokens, and the game blocks on every one of these. Generation time scales
+    with what the model is allowed to emit, so the budget is the cheapest lever
+    on the pause. Raise it in chiron.ini if replies start getting clipped.
+    */
+    chiron_conf.max_tokens = 110;
     chiron_conf.cache_size = 64;
     chiron_conf.debug = 0;
 

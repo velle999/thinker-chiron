@@ -180,8 +180,29 @@ static const uint8_t TextOpenPrologue[] = {0x8b,0x44,0x24,0x08, 0x8b,0x4c,0x24,0
 typedef int(__cdecl *Fengine_text_open)(const char*, const char*);
 static Fengine_text_open orig_text_open = NULL;
 
-// Set when we have left a generated block installed as the engine's open file.
-static char swapped_from[80] = "";
+/*
+NEVER hand the engine a FILE* this DLL created.
+
+terranx.exe imports no C runtime at all -- it statically links MSVC 6's LIBC, so
+its fgets is compiled in at 0x64726A and it keeps its own _iob, its own fd table
+and its own heap. The struct layout happens to match msvcrt (text_get reads
+_flag at +0xC to test _IOEOF and that works), which makes a swapped stream look
+like it is working: the game reads the first lines straight out of the buffer we
+already filled. Then _cnt runs out, its own _filbuf calls _read() with our
+FILE's _file against ITS descriptor table, and the game dies on a foreign handle
+with STATUS_ACCESS_DENIED (c0000022), just after "installed generated block".
+
+The same mismatch in the other direction is why calling ftell() on the engine's
+own stream once hung the game. That was read as "0x9B7CF4 is not a FILE*"; it is
+one, it just belongs to a different CRT.
+
+So the block is handed over by having the ENGINE open it, through its own
+text_open. Every read downstream is then the game's own stdio and nothing
+crosses the boundary.
+*/
+
+// The real script we redirected away from, so the next lookup can go back.
+static char redirected_from[80] = "";
 
 // Position f just past the "#LABEL" line, mirroring what the engine just did
 // on its own handle. Returns false if the label is not in the file.
@@ -201,17 +222,26 @@ static bool seek_to_label(FILE* f, const char* label) {
 
 static int __cdecl chiron_text_open(const char* filename, const char* label) {
     /*
-    The engine keeps the script open and looks up the next label by seeking
-    within it -- that is text_open() called with a NULL filename. If our
-    generated block is still installed at that point, the search runs over a few
-    hundred bytes of rewritten text instead of the real script, finds nothing,
-    and the conversation wedges where the next line should appear. Naming the
-    file forces a genuine reopen.
+    Who is asking. We are entered by the jmp patched over text_open's prologue,
+    so this is the engine function that actually wants the block -- the one whose
+    behaviour decides whether our redirect is read or ignored. Every other signal
+    (reopen returns 0, a probing text_get returns our file's "#xs 440") says the
+    engine is reading our text, and the popup still renders vanilla, so the
+    caller is the only thing left that has not been identified.
     */
-    if (swapped_from[0] && !filename) {
-        filename = swapped_from;
+    chiron_last_caller = __builtin_return_address(0);
+    /*
+    While the engine is pointed at our generated file, a lookup that names no
+    file means "seek inside the script you already have open" -- and that is now
+    a one-block file, so every remaining line of the conversation goes missing.
+    Send it back to the real script by name. TextBufferFileName genuinely says
+    chiron_gen.txt at this point, so the script is a different name and any
+    "same file, just seek" shortcut cannot swallow it.
+    */
+    if (redirected_from[0] && !filename) {
+        filename = redirected_from;
     }
-    swapped_from[0] = '\0';
+    redirected_from[0] = '\0';
 
     int rc = orig_text_open(filename, label);
     if (rc || !label) {
@@ -239,15 +269,27 @@ static int __cdecl chiron_text_open(const char* filename, const char* label) {
             if (seek_to_label(own, label)) {
                 if (FILE* gen = chiron_rewrite_block(own, label)) {
                     /*
-                    The swap still writes through that same unverified pointer.
-                    If the engine turns out not to read a FILE* here, the text
-                    simply stays vanilla -- but do not fclose what was there, as
-                    it may not be a stream we are allowed to close.
+                    Only the written file is wanted; the handle it came back on
+                    is ours and must not reach the engine. See the note above.
                     */
-                    *TextBufferFile = gen;
-                    strncpy(swapped_from, TextBufferFileName, sizeof(swapped_from) - 1);
-                    swapped_from[sizeof(swapped_from) - 1] = '\0';
-                    chiron_trace("rw: installed generated block\n");
+                    fclose(gen);
+
+                    // Remember the script before the reopen overwrites it.
+                    char script[sizeof(redirected_from)];
+                    strncpy(script, TextBufferFileName, sizeof(script) - 1);
+                    script[sizeof(script) - 1] = '\0';
+
+                    if (!orig_text_open(CH_GEN_FILE, label)) {
+                        strcpy(redirected_from, script);
+                        chiron_trace("rw: engine reopened %s at %s\n",
+                            CH_GEN_FILE, label);
+
+                    } else {
+                        // Could not reopen ours -- put the script back, vanilla text.
+                        orig_text_open(script, label);
+                        chiron_trace("rw: engine could not open %s, kept vanilla\n",
+                            CH_GEN_FILE);
+                    }
                 }
             } else {
                 chiron_trace("rw: label %s not found in %s\n", label, TextBufferFileName);
@@ -288,6 +330,18 @@ bool chiron_install_text_hook() {
     target[0] = 0xE9;
     *(int32_t*)(target + 1) = (int32_t)chiron_text_open - ENGINE_TEXT_OPEN - 5;
     VirtualProtect(target, 5, prot, &prot);
+
+    /*
+    The two script names X_text_open picks between: *0x691B0C is the base script
+    the diplomacy popups pass, *0x691B20 the speaking faction's own. Logging them
+    once tells us which spelling ("SCRIPT" vs "SCRIPT.txt") arrives by which
+    route -- the trace shows both and they are not interchangeable.
+    */
+    char** base_script    = (char**)0x691B0C;
+    char** faction_script = (char**)0x691B20;
+    chiron_trace("hook: base script=%s faction script=%s\n",
+        *base_script ? *base_script : "(null)",
+        *faction_script ? *faction_script : "(null)");
 
     chiron_trace("hook: engine text_open redirected (trampoline %p)\n", (void*)tramp);
     return true;
