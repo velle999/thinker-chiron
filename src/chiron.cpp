@@ -512,8 +512,32 @@ static bool json_get_text(const char* body, char* out, size_t out_len) {
     return true;
 }
 
+/*
+Winsock comes up here, at the first generation, and nowhere earlier.
+
+Not in DllMain, and not in chiron_ensure_init either: that runs off the first
+text_open(), which is ALPHAX/TECHNOLOGY during rules loading -- still well
+before the game reserves its draw buffer. Loading ws2_32 and its dependency
+chain (mswsock, iphlpapi, dnsapi, ...) anywhere in that window costs the 32-bit
+address space enough that CreateDIBSection fails, and the game dies with
+"Unable to allocate draw-buffer; terminating program". At a 2560x1440 native
+resolution that buffer is a ~14MB contiguous mapping, so there is little slack.
+
+By the time a faction actually speaks, video init is long done.
+*/
+static bool ensure_winsock() {
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        WSADATA wsa;
+        winsock_ready = load_winsock() && ws.WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+        chiron_trace("winsock: ready=%d (first generation)\n", (int)winsock_ready);
+    }
+    return winsock_ready;
+}
+
 static bool http_generate(const char* prompt, char* out, size_t out_len) {
-    if (!winsock_ready) {
+    if (!ensure_winsock()) {
         return false;
     }
     SOCKET sock = ws.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -820,10 +844,6 @@ static void chiron_ensure_init() {
     chiron_trace("init: enabled=%d %s:%d timeout=%dms debug=%d\n",
         chiron_conf.enabled, chiron_conf.host, chiron_conf.port,
         chiron_conf.timeout_ms, chiron_conf.debug);
-
-    WSADATA wsa;
-    winsock_ready = load_winsock() && ws.WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
-    chiron_trace("init: winsock_ready=%d\n", (int)winsock_ready);
     ch_log("chiron_init: enabled=%d %s:%d timeout=%dms winsock=%d\n",
         chiron_conf.enabled, chiron_conf.host, chiron_conf.port,
         chiron_conf.timeout_ms, (int)winsock_ready);
