@@ -1420,9 +1420,43 @@ static void build_prompt(const Personality* p, const char* prose,
             must_list);
     }
 
+    /*
+    Name the PERSON being spoken to, but ONLY when the line has no placeholder
+    that already does it.
+
+    Most blocks say "$TITLE0 $NAME1" and the engine renders that as "Prime
+    Function Aki Zeta-5" -- correctly, and with the right honorific for the
+    faction. Those are cosmetic, so the model MAY drop them, and it mostly does
+    not: asked to rewrite such a line it kept both placeholders in 3 of 3 runs.
+
+    Handing it the literal name as well makes it worse, not better. It stops
+    using the placeholders and writes the name itself, which is how "Aki
+    Zeta-five" and "Cybernetic Consciousness's Aki Zeta-5" got generated in
+    testing -- the engine would have spelled it correctly every time.
+
+    But a block with NO name placeholder at all (#DIPLO is one) leaves the model
+    nothing to address them by except the faction, and it duly greeted the player
+    as "Cybernetic Consciousness" -- which reads like addressing someone by their
+    employer. So the person's name goes in exactly there, and nowhere else.
+    */
+    bool has_name_token = false;
+    for (int i = 0; i < token_count && !has_name_token; i++) {
+        has_name_token = !_strnicmp(tokens[i], "NAME", 4)
+                      || !_strnicmp(tokens[i], "TITLE", 5);
+    }
+
+    char listener_desc[192];
     const char* listener_name = "another faction";
     if (listener_faction >= 1 && listener_faction < MaxPlayerNum) {
-        listener_name = MFactions[listener_faction].formal_name_faction;
+        const MFaction& lm = MFactions[listener_faction];
+        if (!has_name_token && lm.title_leader[0] && lm.name_leader[0]) {
+            snprintf(listener_desc, sizeof(listener_desc), "%s %s of %s",
+                lm.title_leader, lm.name_leader, lm.formal_name_faction);
+        } else {
+            snprintf(listener_desc, sizeof(listener_desc), "%s",
+                lm.formal_name_faction);
+        }
+        listener_name = listener_desc;
     }
 
     char dossier[1024];
@@ -2255,6 +2289,16 @@ static void protest_prompt(int speaker, int listener, bool heeds,
     char dossier[1024];
     build_dossier(speaker, listener, dossier, sizeof(dossier));
 
+    // The person, not the letterhead -- same reason as build_prompt.
+    char listener_who[192];
+    const MFaction& lm = MFactions[listener];
+    if (lm.title_leader[0] && lm.name_leader[0]) {
+        snprintf(listener_who, sizeof(listener_who), "%s %s of %s",
+            lm.title_leader, lm.name_leader, lm.formal_name_faction);
+    } else {
+        snprintf(listener_who, sizeof(listener_who), "%s", lm.formal_name_faction);
+    }
+
     snprintf(out, out_len,
 "You are %s %s of %s on Planet.\n"
 "BACKGROUND: %s\n"
@@ -2286,7 +2330,7 @@ static void protest_prompt(int speaker, int listener, bool heeds,
         p->title, p->leader, p->faction,
         p->background, p->ideology, p->adjectives, p->blurb,
         dossier,
-        MFactions[listener].formal_name_faction,
+        listener_who,
         bond, leverage,
         heeds ? "CALL THEM OFF" : "REFUSE",
         variation_counter(),
