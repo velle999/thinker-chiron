@@ -180,7 +180,23 @@ static const uint8_t TextOpenPrologue[] = {0x8b,0x44,0x24,0x08, 0x8b,0x4c,0x24,0
 typedef int(__cdecl *Fengine_text_open)(const char*, const char*);
 static Fengine_text_open orig_text_open = NULL;
 
+// Set when we have left a generated block installed as the engine's open file.
+static char swapped_from[80] = "";
+
 static int __cdecl chiron_text_open(const char* filename, const char* label) {
+    /*
+    The engine keeps the script open and looks up the next label by seeking
+    within it -- that is text_open() called with a NULL filename. If our
+    generated block is still installed at that point, the search runs over a few
+    hundred bytes of rewritten text instead of the real script, finds nothing,
+    and the conversation wedges where the next line should appear. Naming the
+    file forces a genuine reopen.
+    */
+    if (swapped_from[0] && !filename) {
+        filename = swapped_from;
+    }
+    swapped_from[0] = '\0';
+
     int rc = orig_text_open(filename, label);
     if (rc || !label) {
         return rc; // engine could not find it; nothing to rewrite
@@ -192,6 +208,8 @@ static int __cdecl chiron_text_open(const char* filename, const char* label) {
             if (FILE* gen = chiron_rewrite_block(cur, label)) {
                 fclose(cur);
                 *TextBufferFile = gen;
+                strncpy(swapped_from, TextBufferFileName, sizeof(swapped_from) - 1);
+                swapped_from[sizeof(swapped_from) - 1] = '\0';
             }
         }
     }

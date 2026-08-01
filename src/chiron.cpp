@@ -849,6 +849,7 @@ static bool http_generate(const char* prompt, char* out, size_t out_len) {
         "Connection: close\r\n\r\n%s",
         chiron_conf.host, chiron_conf.port, body_len, body);
 
+    chiron_trace("http: sending %d bytes\n", req_len);
     if (ws.send(sock, req, req_len, 0) != req_len) {
         ws.closesocket(sock);
         return false;
@@ -867,6 +868,7 @@ static bool http_generate(const char* prompt, char* out, size_t out_len) {
         }
     }
     ws.closesocket(sock);
+    chiron_trace("http: received %d bytes\n", total);
     resp[total > 0 ? total : 0] = '\0';
     if (total <= 0) {
         ch_log("http: empty response\n");
@@ -945,8 +947,10 @@ FILE* chiron_rewrite_block(FILE* src, const char* label) {
         return NULL;
     }
 
+    chiron_trace("rw: enter %s\n", label);
     long start_pos = ftell(src);
     if (start_pos < 0) {
+        chiron_trace("rw: ftell failed\n");
         return NULL;
     }
 
@@ -963,6 +967,7 @@ FILE* chiron_rewrite_block(FILE* src, const char* label) {
         line_count++;
     }
     fseek(src, start_pos, SEEK_SET);
+    chiron_trace("rw: read %d lines\n", line_count);
     if (line_count == 0) {
         return NULL;
     }
@@ -996,7 +1001,10 @@ FILE* chiron_rewrite_block(FILE* src, const char* label) {
     build_prompt(p, prose, tokens, token_count, prompt, sizeof(prompt));
 
     static char generated[4096];
-    if (!http_generate(prompt, generated, sizeof(generated))) {
+    chiron_trace("rw: prompt built (%d bytes), calling bridge\n", (int)strlen(prompt));
+    bool ok = http_generate(prompt, generated, sizeof(generated));
+    chiron_trace("rw: bridge returned %d\n", (int)ok);
+    if (!ok) {
         ch_log("[%s] generation failed, using vanilla\n", label);
         return NULL;
     }
