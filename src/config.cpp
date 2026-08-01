@@ -183,6 +183,22 @@ static Fengine_text_open orig_text_open = NULL;
 // Set when we have left a generated block installed as the engine's open file.
 static char swapped_from[80] = "";
 
+// Position f just past the "#LABEL" line, mirroring what the engine just did
+// on its own handle. Returns false if the label is not in the file.
+static bool seek_to_label(FILE* f, const char* label) {
+    char want[StrBufLen];
+    snprintf(want, StrBufLen, "#%s", label);
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        kill_lf(line);
+        purge_spaces(line);
+        if (!_stricmp(line, want)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static int __cdecl chiron_text_open(const char* filename, const char* label) {
     /*
     The engine keeps the script open and looks up the next label by seeking
@@ -203,14 +219,42 @@ static int __cdecl chiron_text_open(const char* filename, const char* label) {
     }
     const char* name = filename ? filename : TextBufferFileName;
     if (chiron_should_rewrite(name, label)) {
-        FILE* cur = *TextBufferFile;
-        if (cur) {
-            if (FILE* gen = chiron_rewrite_block(cur, label)) {
-                fclose(cur);
-                *TextBufferFile = gen;
-                strncpy(swapped_from, TextBufferFileName, sizeof(swapped_from) - 1);
-                swapped_from[sizeof(swapped_from) - 1] = '\0';
+        /*
+        Read the block through our own handle rather than the engine's.
+
+        *TextBufferFile (0x9B7CF4) is a reverse-engineered guess -- config.cpp
+        declares it FILE** but nothing in Thinker ever reads through it, so the
+        type is unverified. Calling ftell() on it hung the game outright: the
+        trace reached "rw: enter DEMANDTECH10" and stopped before the very next
+        line, with only a bounded 64-iteration loop in between.
+
+        We already know the filename and the label, so opening the script again
+        and seeking to it ourselves costs one file handle and assumes nothing.
+        */
+        chiron_trace("rw: engine file=%p name=%s\n",
+            (void*)*TextBufferFile, TextBufferFileName);
+
+        FILE* own = env_open(TextBufferFileName, "rt");
+        if (own) {
+            if (seek_to_label(own, label)) {
+                if (FILE* gen = chiron_rewrite_block(own, label)) {
+                    /*
+                    The swap still writes through that same unverified pointer.
+                    If the engine turns out not to read a FILE* here, the text
+                    simply stays vanilla -- but do not fclose what was there, as
+                    it may not be a stream we are allowed to close.
+                    */
+                    *TextBufferFile = gen;
+                    strncpy(swapped_from, TextBufferFileName, sizeof(swapped_from) - 1);
+                    swapped_from[sizeof(swapped_from) - 1] = '\0';
+                    chiron_trace("rw: installed generated block\n");
+                }
+            } else {
+                chiron_trace("rw: label %s not found in %s\n", label, TextBufferFileName);
             }
+            fclose(own);
+        } else {
+            chiron_trace("rw: could not open %s\n", TextBufferFileName);
         }
     }
     return rc;
