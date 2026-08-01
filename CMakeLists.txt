@@ -69,7 +69,7 @@ target_link_options(thinkerlib PRIVATE
 )
 target_compile_definitions(thinkerlib PRIVATE BUILD_DLL)
 set_target_properties(thinkerlib PROPERTIES PREFIX "" OUTPUT_NAME "thinker" SUFFIX ".dll")
-target_link_libraries(thinkerlib PRIVATE user32 gdi32 winmm psapi)
+target_link_libraries(thinkerlib PRIVATE user32 gdi32 winmm psapi ws2_32)
 
 # ---------- Launch executable ----------
 file(GLOB THINKER_LAUNCH_SOURCES

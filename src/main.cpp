@@ -1,6 +1,7 @@
 
 #include "main.h"
 #include "lib/ini.h"
+#include "chiron.h"
 
 FILE* debug_log = NULL;
 Config conf;
@@ -468,6 +469,7 @@ DLL_EXPORT BOOL APIENTRY DllMain(HINSTANCE UNUSED(hinstDLL), DWORD fdwReason, LP
                     MOD_VERSION, MB_OK | MB_ICONSTOP);
                 exit_fail();
             }
+            chiron_init();
             *EngineVersion = MOD_VERSION;
             *EngineDate = MOD_DATE;
             seed = GetTickCount();
@@ -478,6 +480,7 @@ DLL_EXPORT BOOL APIENTRY DllMain(HINSTANCE UNUSED(hinstDLL), DWORD fdwReason, LP
             break;
 
         case DLL_PROCESS_DETACH:
+            chiron_shutdown();
             if (debug_log) {
                 fclose(debug_log);
             }

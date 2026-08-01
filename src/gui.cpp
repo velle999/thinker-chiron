@@ -1,5 +1,6 @@
 
 #include "gui.h"
+#include "chiron.h"
 
 const int32_t MainWinHandle = (int32_t)(&MapWin->oMainWin.field_4); // 0x939444
 
@@ -1466,6 +1467,9 @@ StrBuffer in make_gift but diplomacy_caption overwrites it with other data.
 void __cdecl mod_diplomacy_caption(int faction1, int faction2)
 {
     char buf[StrBufLen];
+    // Chiron Rising: this fires as a diplomacy dialog is built, and is the only
+    // place both sides of the conversation are known before the text is read.
+    chiron_set_speakers(faction1, faction2);
     strcpy_n(buf, StrBufLen, StrBuffer);
     diplomacy_caption(faction1, faction2);
     strcpy_n(StrBuffer, StrBufLen, buf);

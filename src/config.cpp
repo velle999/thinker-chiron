@@ -1,5 +1,6 @@
 
 #include "config.h"
+#include "chiron.h"
 
 const char* AlphaFile = "ALPHAX";
 const char* ScriptFile = "SCRIPT";
@@ -128,6 +129,18 @@ int __cdecl text_open(const char* filename, const char* label) {
         kill_lf(Text.SrcPtr);
         purge_spaces(Text.SrcPtr);
     } while (_stricmp(sect_header, Text.SrcPtr));
+    /*
+    Chiron Rising: the engine has now seeked to #LABEL. For faction dialogue,
+    swap in a file holding an LLM-rewritten version of this block. text_get()
+    below keeps fgets()ing from Text.File and never needs to know. Returning
+    NULL means "use the vanilla block", so every failure is a no-op.
+    */
+    if (chiron_should_rewrite(filename ? filename : Text.FileName, label)) {
+        if (FILE* gen = chiron_rewrite_block(Text.File, label)) {
+            fclose(Text.File);
+            Text.File = gen;
+        }
+    }
     Text.Position = Text.SrcPtr;
     return false;
 }
