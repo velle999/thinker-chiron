@@ -135,6 +135,18 @@ Value:
 #caption $MSG0
 $MSG1
 
+#CHIRONNEWS
+#xs 440
+#caption $MSG0
+$MSG1
+$MSG2
+$MSG3
+$MSG4
+$MSG5
+$MSG6
+$MSG7
+$MSG8
+
 #PROBE
 #xs 440
 #caption Operations Director

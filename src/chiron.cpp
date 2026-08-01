@@ -6,6 +6,7 @@
 
 #include "chiron.h"
 #include "config.h"
+#include "faction.h"   // is_alive, for the news digest's roll call
 
 ChironConfig chiron_conf = {};
 
@@ -837,8 +838,9 @@ static void sentence_key(const char* s, size_t len, char* out, size_t out_len) {
     out[j] = '\0';
 }
 
-static void tidy_reply(char* text) {
-    // 1. Drop everything from the first scaffolding line onwards.
+// Everything from the first scaffolding line onwards is the model narrating the
+// task rather than doing it, and so is everything after it.
+static void cut_at_scaffolding(char* text) {
     for (char* s = text; s; ) {
         char* nl = strchr(s, '\n');
         char* next = nl ? nl + 1 : NULL;
@@ -860,6 +862,10 @@ static void tidy_reply(char* text) {
         }
         s = next;
     }
+}
+
+static void tidy_reply(char* text) {
+    cut_at_scaffolding(text);
 
     // Quotes come off here so they can never split a sentence below.
     char flat[4096];
@@ -1925,6 +1931,294 @@ bool chiron_name_base(int faction_id, char* name, bool sea_base) {
         }
     }
     return false;
+}
+
+// ── planetary news digest ──────────────────────────────────────────────────
+
+/*
+An in-fiction bulletin on the state of Planet, on demand at Alt+N.
+
+Unlike everything else here this is not a rewrite of shipped text -- there is no
+vanilla equivalent to fall back to, so it is deliberately the one feature the
+player asks for rather than one that happens to them. That also settles the cost
+question: a couple of seconds is a wait you chose, where the same pause during
+turn processing would read as a hang.
+
+The facts are gathered from engine state and handed over as a list; the model's
+only job is to put them in the mouth of a news service. Nothing here is invented
+by the model that the player could act on -- if it embellishes, it embellishes
+the prose around numbers that are already true.
+*/
+#define CH_NEWS_LINES 8
+
+/*
+NEWS IS WHAT CHANGED, and a snapshot is not news.
+
+Handed the current standings, the model transcribed the table and then padded to
+the token ceiling with invention -- "Spartan Federation suffers losses", "Gaia's
+Stepdaughters face food shortages", and a war between two factions who were not
+at war. That is not the model being unruly. A snapshot contains no events, so a
+prompt that asks for a report of events leaves it nothing to write and every
+incentive to make some up.
+
+Given the same turn expressed as deltas it reports accurately and invents
+nothing. So we keep last bulletin's numbers and diff against them.
+*/
+struct NewsSnapshot {
+    bool valid;
+    int  turn;
+    bool alive[MaxPlayerNum];
+    int  base_count[MaxPlayerNum];
+    int  major_atrocities[MaxPlayerNum];
+    int  diplo_status[MaxPlayerNum][MaxPlayerNum];
+};
+
+static NewsSnapshot last_news = {};
+
+static void take_snapshot(NewsSnapshot& s) {
+    s.valid = true;
+    s.turn = *CurrentTurn;
+    for (int i = 1; i < MaxPlayerNum; i++) {
+        s.alive[i] = is_alive(i);
+        s.base_count[i] = Factions[i].base_count;
+        s.major_atrocities[i] = Factions[i].major_atrocities;
+        for (int j = 1; j < MaxPlayerNum; j++) {
+            s.diplo_status[i][j] = Factions[i].diplo_status[j];
+        }
+    }
+}
+
+// The standings line that closes every bulletin: who leads, and where we stand.
+static void news_standing(char* out, size_t out_len) {
+    int me = MapWin ? MapWin->cOwner : 0;
+    int lead = 0;
+    for (int i = 1; i < MaxPlayerNum; i++) {
+        if (is_alive(i) && (!lead || Factions[i].base_count > Factions[lead].base_count)) {
+            lead = i;
+        }
+    }
+    if (!lead) {
+        out[0] = '\0';
+        return;
+    }
+    if (me >= 1 && me < MaxPlayerNum && me != lead) {
+        snprintf(out, out_len, "Standing now: %s leads with %d bases; we hold %d.\n",
+            MFactions[lead].formal_name_faction, Factions[lead].base_count,
+            Factions[me].base_count);
+    } else {
+        snprintf(out, out_len, "Standing now: we lead with %d bases.\n",
+            Factions[lead].base_count);
+    }
+}
+
+/*
+Everything that moved since the last bulletin. Returns how many things did --
+zero means there is no dispatch to write, and the caller must not ask for one.
+*/
+static int news_deltas(const NewsSnapshot& prev, char* out, size_t out_len) {
+    int changes = 0;
+    size_t n = 0;
+    out[0] = '\0';
+    #define FACT(...) \
+        n = strlen(out); \
+        snprintf(out + n, n < out_len ? out_len - n : 0, __VA_ARGS__); \
+        changes++
+
+    for (int i = 1; i < MaxPlayerNum; i++) {
+        if (!prev.alive[i] && !is_alive(i)) {
+            continue;
+        }
+        if (prev.alive[i] && !is_alive(i)) {
+            FACT("- %s has been eliminated.\n", MFactions[i].formal_name_faction);
+            continue;
+        }
+        int d = Factions[i].base_count - prev.base_count[i];
+        if (d > 0) {
+            FACT("- %s founded or took %d base%s, and now holds %d.\n",
+                MFactions[i].formal_name_faction, d, d > 1 ? "s" : "",
+                Factions[i].base_count);
+        } else if (d < 0) {
+            FACT("- %s lost %d base%s, and now holds %d.\n",
+                MFactions[i].formal_name_faction, -d, d < -1 ? "s" : "",
+                Factions[i].base_count);
+        }
+        if (Factions[i].major_atrocities > prev.major_atrocities[i]) {
+            FACT("- %s was condemned for a major atrocity.\n",
+                MFactions[i].formal_name_faction);
+        }
+
+        // Treaties are mutual; report each pair once, from the lower index.
+        for (int j = i + 1; j < MaxPlayerNum; j++) {
+            if (!is_alive(j)) {
+                continue;
+            }
+            int was = prev.diplo_status[i][j];
+            int now = Factions[i].diplo_status[j];
+            if (!(was & DIPLO_VENDETTA) && (now & DIPLO_VENDETTA)) {
+                FACT("- %s declared war on %s.\n",
+                    MFactions[i].formal_name_faction,
+                    MFactions[j].formal_name_faction);
+            } else if ((was & DIPLO_VENDETTA) && !(now & DIPLO_VENDETTA)) {
+                FACT("- %s and %s have stopped fighting.\n",
+                    MFactions[i].formal_name_faction,
+                    MFactions[j].formal_name_faction);
+            }
+            if (!(was & DIPLO_PACT) && (now & DIPLO_PACT)) {
+                FACT("- %s and %s signed a pact.\n",
+                    MFactions[i].formal_name_faction,
+                    MFactions[j].formal_name_faction);
+            }
+        }
+    }
+    #undef FACT
+    return changes;
+}
+
+// One-line popup through the stock #GENERIC block.
+static void news_notice(const char* text) {
+    parse_says(0, "Planetnet", -1, -1);
+    parse_says(1, text, -1, -1);
+    popp("modmenu", "GENERIC", 0, 0, 0);
+}
+
+void chiron_show_news() {
+    chiron_ensure_init();
+
+    char facts[2048];
+    char standing[256];
+    news_standing(standing, sizeof(standing));
+
+    if (!last_news.valid) {
+        // Nothing to diff against yet, so the first bulletin is the standings.
+        snprintf(facts, sizeof(facts),
+            "This is the first bulletin of the colony.\n%s", standing);
+    } else {
+        char deltas[1536];
+        int changes = news_deltas(last_news, deltas, sizeof(deltas));
+        /*
+        No news is not a prompt. Asked to report a turn in which nothing moved,
+        the model filled the space with invention -- a base count that was never
+        true, a growth rate nobody measured. Say so directly instead: it is
+        honest, it is instant, and it costs no generation.
+        */
+        if (!changes) {
+            take_snapshot(last_news);
+            ch_log("[news] no developments since turn %d\n", last_news.turn);
+            news_notice("No developments since the last bulletin.");
+            return;
+        }
+        snprintf(facts, sizeof(facts),
+            "Since the last bulletin (turn %d, now turn %d):\n%s%s",
+            last_news.turn, *CurrentTurn, deltas, standing);
+    }
+    take_snapshot(last_news);
+
+    int me = MapWin ? MapWin->cOwner : 0;
+    const char* our_name = (me >= 1 && me < MaxPlayerNum)
+        ? MFactions[me].formal_name_faction : "the colonists";
+
+    static char prompt[4096];
+    snprintf(prompt, sizeof(prompt),
+"You write for Planetnet, the wire service read across Planet.\n"
+"Your readers are the colonists of %s.\n"
+"\n"
+"WHAT CHANGED:\n%s"
+"\n"
+"Dispatch %d. Report it for your readers.\n"
+"\n"
+"RULES:\n"
+"- Three or four sentences of prose. Never a list.\n"
+"- Lead with whatever matters most to us, and say what it means for us.\n"
+"- No line longer than %d characters.\n"
+"- Dry and clipped, the way a wire service writes on a frontier world.\n"
+"- Start with the news itself: no headline, no byline, no date, no faction name "
+"and colon at the front.\n"
+"\n"
+/*
+The anti-invention rule goes last, on its own, for the same reason the
+placeholder reminder does: the close of the prompt is what carries.
+*/
+"Report only what is listed above. Invent no battle, no famine, no treaty, no "
+"number and no faction beyond it.\n"
+"\n"
+"DISPATCH:\n",
+        our_name, facts, variation_counter(), CH_WRAP_COLS);
+
+    static char reply[4096];
+    chiron_trace("news: prompt built (%d bytes)\n", (int)strlen(prompt));
+    /*
+    120 tokens is four sentences with no room left over. At 220 the model filled
+    the slack rather than stopping, and what it filled it with was invented.
+    */
+    bool ok = http_generate(prompt, reply, sizeof(reply), 120);
+    if (!ok) {
+        ch_log("[news] generation failed\n");
+        news_notice("The relay is silent. No dispatch this turn.");
+        return;
+    }
+    strip_preamble(reply);
+    cut_at_scaffolding(reply);
+
+    /*
+    Same width as the diplomacy wrapper, and for the same reason: the engine has
+    never parsed a line longer than about 106 characters, and a generated
+    paragraph arrives as one long line. See write_wrapped for the crash that
+    taught us. Breaks are on spaces only, and a single word longer than the
+    width is truncated rather than allowed to run over the line buffer.
+    */
+    char lines[CH_NEWS_LINES][CH_WRAP_COLS + 2];
+    int count = 0;
+    size_t col = 0;
+    lines[0][0] = '\0';
+
+    const char* s = reply;
+    while (*s && count < CH_NEWS_LINES) {
+        while (*s == ' ' || *s == '\n' || *s == '\r' || *s == '\t') {
+            s++;
+        }
+        const char* w = s;
+        while (*s && *s != ' ' && *s != '\n' && *s != '\r' && *s != '\t') {
+            s++;
+        }
+        size_t len = (size_t)(s - w);
+        if (!len) {
+            break;
+        }
+        if (len > CH_WRAP_COLS) {
+            len = CH_WRAP_COLS;
+        }
+        if (col && col + 1 + len > CH_WRAP_COLS) {
+            count++;
+            if (count >= CH_NEWS_LINES) {
+                // Out of lines. Clear col so the tail below cannot count a
+                // ninth line into an array that holds eight.
+                col = 0;
+                break;
+            }
+            lines[count][0] = '\0';
+            col = 0;
+        }
+        if (col) {
+            lines[count][col++] = ' ';
+        }
+        memcpy(&lines[count][col], w, len);
+        col += len;
+        lines[count][col] = '\0';
+    }
+    if (col) {
+        count++;
+    }
+    if (!count) {
+        ch_log("[news] empty dispatch\n");
+        return;
+    }
+
+    parse_says(0, "Planetnet", -1, -1);
+    for (int i = 0; i < CH_NEWS_LINES; i++) {
+        parse_says(i + 1, i < count ? lines[i] : "", -1, -1);
+    }
+    ch_log("[news] dispatch, %d lines\n", count);
+    popp("modmenu", "CHIRONNEWS", 0, 0, 0);
 }
 
 static bool chiron_ready = false;

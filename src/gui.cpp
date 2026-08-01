@@ -696,6 +696,11 @@ LRESULT WINAPI ModWinProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     } else if (conf.smooth_scrolling && msg == WM_CHAR && wParam == 'r' && alt_key_down()) {
         CState.MouseOverTileInfo = !CState.MouseOverTileInfo;
 
+    } else if (msg == WM_CHAR && wParam == 'n' && alt_key_down()
+    && !*GameHalted && current_window() == GW_World) {
+        // Planetnet dispatch. Map window only, so it cannot fire at the menus.
+        chiron_show_news();
+
     } else if (!conf.reduced_mode && msg == WM_CHAR && wParam == 't' && alt_key_down()) {
         show_mod_menu();
 

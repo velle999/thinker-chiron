@@ -80,6 +80,18 @@ return leaves the vanilla path exactly as it was, offsets and all.
 */
 bool chiron_name_base(int faction_id, char* name, bool sea_base);
 
+/*
+Generate and show the Planetnet dispatch: an in-fiction summary of the state of
+Planet, built from engine state. Bound to Alt+N in the map window.
+
+The only feature here with no vanilla text behind it, so it is the only one the
+player invokes deliberately -- a couple of seconds is a wait you asked for,
+where the same pause during turn processing would read as the game hanging.
+Renders through #CHIRONNEWS in modmenu.txt, which must therefore be the copy
+install.sh ships.
+*/
+void chiron_show_news();
+
 // The file chiron_rewrite_block() writes the replacement block into.
 #define CH_GEN_FILE "chiron_gen.txt"
 
