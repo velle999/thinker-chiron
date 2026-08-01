@@ -23,18 +23,37 @@ set(CMAKE_RC_COMPILE_OBJECT "<CMAKE_RC_COMPILER> -O coff <DEFINES> <INCLUDES> <F
 
 # ---------- C runtime ----------
 # Thinker shares FILE* handles and heap allocations directly with a 1999 game
-# built against msvcrt. Toolchains that default to UCRT (Arch's mingw-w64 does)
-# link api-ms-win-crt-* instead, giving the DLL a separate heap and an
-# incompatible FILE layout. The symptom is not a crash in the mod: the game
-# comes up, plays its music, then dies with "Unable to allocate draw-buffer".
-# Upstream's released DLL imports msvcrt.dll, so match it exactly.
+# built against msvcrt. A UCRT build links api-ms-win-crt-* instead, giving the
+# DLL a separate heap and an incompatible FILE layout. The symptom is not a
+# crash in the mod: the game comes up, plays its music, then dies with "Unable
+# to allocate draw-buffer".
 # Verify with: i686-w64-mingw32-objdump -p thinker.dll | grep 'DLL Name'
-add_compile_options(-mcrtdll=msvcrt-os)
-add_link_options(-mcrtdll=msvcrt-os)
+#
+# A toolchain built for msvcrt needs nothing here. One that defaults to UCRT
+# (Arch's mingw-w64 does) can be pushed over with -mcrtdll=msvcrt-os, but that
+# is a workaround, not an equivalence -- its libstdc++ is still a UCRT
+# libstdc++, and the resulting DLL has never been made to work. Prefer a
+# natively-msvcrt toolchain; see docs/toolchain.md.
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles("
+#include <corecrt.h>
+#ifdef _UCRT
+#error toolchain targets UCRT
+#endif
+int main() { return 0; }
+" MOD_CRT_IS_MSVCRT)
 
-# libstdc++ here was configured for UCRT and assumes C11 quick_exit exists.
-# See src/msvcrt_compat.h.
-add_compile_options(-include ${CMAKE_CURRENT_SOURCE_DIR}/src/msvcrt_compat.h)
+if(NOT MOD_CRT_IS_MSVCRT)
+    message(WARNING
+        "Toolchain defaults to UCRT. Falling back to -mcrtdll=msvcrt-os plus the "
+        "msvcrt_compat shims. This produces a DLL that imports msvcrt.dll but "
+        "still fails at startup with 'Unable to allocate draw-buffer'. "
+        "Use a natively-msvcrt toolchain instead -- see docs/toolchain.md.")
+    add_compile_options(-mcrtdll=msvcrt-os)
+    add_link_options(-mcrtdll=msvcrt-os)
+    # libstdc++ here was configured for UCRT and assumes C11 quick_exit exists.
+    add_compile_options(-include ${CMAKE_CURRENT_SOURCE_DIR}/src/msvcrt_compat.h)
+endif()
 
 # ---------- Common compiler flags ----------
 set(COMMON_CXX_FLAGS "-pedantic -Wall -Wextra -Wshadow -Wundef -Wuseless-cast -Wpointer-arith -Wfloat-conversion")
