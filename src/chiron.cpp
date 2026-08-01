@@ -37,6 +37,8 @@ static struct {
     int    (WSAAPI *closesocket)(SOCKET);
     u_short(WSAAPI *htons)(u_short);
     unsigned long (WSAAPI *inet_addr)(const char*);
+    int    (WSAAPI *ioctlsocket)(SOCKET, long, u_long*);
+    int    (WSAAPI *select)(int, fd_set*, fd_set*, fd_set*, const timeval*);
 } ws = {};
 
 static bool load_winsock() {
@@ -63,6 +65,8 @@ static bool load_winsock() {
     WS_BIND(closesocket)
     WS_BIND(htons)
     WS_BIND(inet_addr)
+    WS_BIND(ioctlsocket)
+    WS_BIND(select)
     #undef WS_BIND
     #pragma GCC diagnostic pop
     return true;
@@ -798,12 +802,36 @@ static bool http_generate(const char* prompt, char* out, size_t out_len) {
     addr.sin_port = ws.htons((u_short)chiron_conf.port);
     addr.sin_addr.s_addr = ws.inet_addr(chiron_conf.host);
 
+    /*
+    Bounded connect. SO_RCVTIMEO/SO_SNDTIMEO do not apply to connect(), so a
+    blocking connect that goes nowhere stalls for the OS TCP timeout -- minutes,
+    with the game frozen, because this all runs on its single thread. Go
+    non-blocking, wait on select(), then restore blocking so the send/recv
+    timeouts above still apply.
+    */
+    u_long nonblocking = 1;
+    ws.ioctlsocket(sock, FIONBIO, &nonblocking);
+
     if (ws.connect(sock, (sockaddr*)&addr, sizeof(addr)) != 0) {
-        ch_log("http: connect to %s:%d failed (%d)\n",
-            chiron_conf.host, chiron_conf.port, ws.WSAGetLastError());
-        ws.closesocket(sock);
-        return false;
+        int connect_ms = chiron_conf.timeout_ms < 2000 ? chiron_conf.timeout_ms : 2000;
+        timeval wait;
+        wait.tv_sec = connect_ms / 1000;
+        wait.tv_usec = (connect_ms % 1000) * 1000;
+        fd_set writable;
+        FD_ZERO(&writable);
+        FD_SET(sock, &writable);
+        // First argument is ignored on Windows; the set carries the sockets.
+        if (ws.select(0, NULL, &writable, NULL, &wait) <= 0) {
+            ch_log("http: connect to %s:%d timed out after %dms\n",
+                chiron_conf.host, chiron_conf.port, connect_ms);
+            chiron_trace("http: connect timed out (%s:%d)\n",
+                chiron_conf.host, chiron_conf.port);
+            ws.closesocket(sock);
+            return false;
+        }
     }
+    nonblocking = 0;
+    ws.ioctlsocket(sock, FIONBIO, &nonblocking);
 
     // Body first so we can set an accurate Content-Length.
     static char esc[16384];
@@ -1088,6 +1116,24 @@ static void chiron_ensure_init() {
     chiron_trace("init: enabled=%d %s:%d timeout=%dms debug=%d\n",
         chiron_conf.enabled, chiron_conf.host, chiron_conf.port,
         chiron_conf.timeout_ms, chiron_conf.debug);
+
+    /*
+    Bring winsock up here, at the first text lookup during startup, rather than
+    at the first generation.
+
+    Deferring it that far was a workaround for a startup crash that turned out
+    to have nothing to do with winsock -- it was a stale modmenu.txt. What
+    deferring actually bought was a LoadLibraryA("ws2_32.dll") executed deep
+    inside a modal diplomacy dialog, which hung the game outright: the trace
+    stopped at "hook: rewriting ..." and never reached the line below.
+
+    Here we are on the game's normal startup path with no dialog open, which is
+    a safe place to pull in a DLL. If it fails, winsock_ready stays false and
+    every generation falls back to vanilla text.
+    */
+    if (chiron_conf.enabled) {
+        ensure_winsock();
+    }
     ch_log("chiron_init: enabled=%d %s:%d timeout=%dms winsock=%d\n",
         chiron_conf.enabled, chiron_conf.host, chiron_conf.port,
         chiron_conf.timeout_ms, (int)winsock_ready);
