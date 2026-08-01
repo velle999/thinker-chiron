@@ -1657,8 +1657,35 @@ FILE* chiron_rewrite_block(FILE* src, const char* label) {
         chiron_trace("rw: %s has no control lines -- menu, not speech\n", label);
         return NULL;
     }
+    /*
+    The body ends at a blank line OR at the next control line, whichever comes
+    first.
+
+    Control lines are not only a header: #DIPLO is
+
+        #xs 440
+        #caption $CAPTION7
+        "Have you any further business?"
+        #itemlist
+
+    with #itemlist AFTER the speech and no blank line between them. Stopping
+    only at the blank swallowed that directive into the prose and handed it to
+    the model as if it were something a leader says. It came back rewritten and
+    echoed, and the popup read
+
+        "What more do you demand of me, machine? #itemlist What's left for you
+         to take, Ulrik? #itemlist Is this your way of testing me, Aki?"
+
+    -- an engine directive rendered as dialogue, three times over, because the
+    model treated the separator as a cue to produce another variant.
+
+    Everything from body_end on is already copied through verbatim, so ending
+    the body here also puts #itemlist back where the engine expects it, at
+    column 0 and unwrapped.
+    */
     int body_end = body_start;
-    while (body_end < line_count && lines[body_end][0] != '\0') {
+    while (body_end < line_count && lines[body_end][0] != '\0'
+           && !is_control_line(lines[body_end])) {
         body_end++;
     }
     if (body_end <= body_start) {
