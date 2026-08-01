@@ -405,6 +405,31 @@ static bool name_is(const char* filename, const char* base) {
     return filename[n] == '\0' || !_stricmp(filename + n, ".txt");
 }
 
+/*
+Every file that carries faction-to-faction speech.
+
+There is more than one. The base game reads SCRIPT/xscript, but an Alien
+Crossfire game with Progenitor factions in it pulls the same labels from
+alienuscript and alienIscript -- a Usurpers game logged
+"alienuscript / DEMANDBRIBE0" and "alienuscript / VENDETTA14" and had every one
+rejected here while everything else about the mod looked healthy.
+
+TUTOR is deliberately absent: it uses the same label names for tutorial prompts,
+which are narration rather than a leader speaking.
+*/
+static const char* SpeechFiles[] = {
+    "SCRIPT", "xscript", "alienuscript", "alienIscript",
+};
+
+static bool is_speech_file(const char* filename) {
+    for (auto& f : SpeechFiles) {
+        if (name_is(filename, f)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool chiron_should_rewrite(const char* filename, const char* label) {
     static bool first = true;
     if (first) {
@@ -444,8 +469,8 @@ bool chiron_should_rewrite(const char* filename, const char* label) {
     worth recording. A silent miss here looks exactly like the mod not being
     installed, which is the most expensive failure mode this thing has.
     */
-    if (!name_is(filename, ScriptFile) && !name_is(filename, "alienIscript")) {
-        chiron_trace("skip: %s / %s -- unexpected file\n", filename, label);
+    if (!is_speech_file(filename)) {
+        chiron_trace("skip: %s / %s -- not a speech file\n", filename, label);
         return false;
     }
     const Personality* p = find_personality(speaker_faction);
