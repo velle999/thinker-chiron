@@ -818,10 +818,16 @@ static bool is_scaffolding(const char* s) {
     if (isdigit((unsigned char)s[0]) && (s[1] == '.' || s[1] == ')')) {
         return true;
     }
-    // "PHRASING 1:", "RULES:", "NOTE:" -- capitals and spaces up to a colon.
+    /*
+    "PHRASING 1:", "RULES:", "NOTE:" -- capitals up to a colon. Punctuation that
+    survives shouting has to be allowed through or the scan stops at it: the cue
+    the model invented for itself was "MESSAGE IN YOUR VOICE, WITH A SPECIFIC
+    GRIEVANCE:", and a comma was enough to make this return false.
+    */
     int n = 0;
     while (s[n] && (isupper((unsigned char)s[n]) || isdigit((unsigned char)s[n])
-                    || s[n] == ' ')) {
+                    || s[n] == ' ' || s[n] == ',' || s[n] == '-'
+                    || s[n] == '\'' || s[n] == '.')) {
         n++;
     }
     return n >= 3 && s[n] == ':';
@@ -859,6 +865,16 @@ static const char* MetaMarkers[] = {
     "this is a response", "this response", "as an ai", "as a language model",
     "i hope this", "let me know", "feel free to", "disclaimer",
     "(note", "note that this", "prompt from", "original prompt",
+    /*
+    Our own answer cues. The prompt ends on one -- "MESSAGE IN YOUR VOICE:",
+    "DISPATCH:", "YOUR ANSWER:" -- and a small model sometimes writes the label
+    out before answering, or worse, elaborates it and starts again: a pact
+    greeting came back as "... Captain Svensgaard. MESSAGE IN YOUR VOICE, WITH A
+    SPECIFIC GRIEVANCE: Greetings, Prime Function Aki Zeta-5 ...". strip_preamble
+    only removes a cue at the very start, and this one was mid-line and reworded,
+    so it needs cutting wherever it appears.
+    */
+    "message in your voice", "your answer:", "dispatch:", "names:",
 };
 
 // strstr, case-insensitively, without depending on a non-standard _stristr.
