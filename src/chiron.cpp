@@ -1712,8 +1712,22 @@ FILE* chiron_rewrite_block(FILE* src, const char* label) {
         fclose(gen);
         return NULL;
     }
-    ch_log("[%s] rewritten as %s (%d placeholders preserved)\n",
-        label, p->leader, token_count);
+    /*
+    Report how many placeholders actually SURVIVED, not how many the vanilla
+    line had. This said "3 placeholders preserved" for a reply that had dropped
+    one of the three, because it logged token_count -- the collected total -- so
+    the log positively asserted the thing that had gone wrong was fine.
+    */
+    int kept = 0;
+    for (int i = 0; i < token_count; i++) {
+        char needle[66];
+        snprintf(needle, sizeof(needle), "$%s", tokens[i]);
+        if (strstr(generated, needle)) {
+            kept++;
+        }
+    }
+    ch_log("[%s] rewritten as %s (%d/%d placeholders kept)\n",
+        label, p->leader, kept, token_count);
     return gen;
 }
 
@@ -2040,11 +2054,60 @@ bool chiron_name_base(int faction_id, char* name, bool sea_base) {
     return false;
 }
 
+/*
+Chiron's own popups must give the engine's substitution slots back.
+
+parse_says(n, ...) writes ParseStrBuffer[n], which is the SAME table the game's
+own $TOKEN<n> substitutions read, and it carries a gender and a plural flag that
+gendered nouns depend on. Our popups pass -1 for both because a dispatch line has
+no gender.
+
+Leaving that behind corrupts the next vanilla line that happens to use the slot.
+It cost a real bug: the Planetnet dispatch writes slots 1-8, and a pact proposal
+a few turns later rendered
+
+    "Swear a  with me"
+
+because {$PACTOFBROTHERORSISTERHOOD2} resolves a gendered noun from slot 2, and
+slot 2 was holding a news line with gender -1. The generated text was correct --
+the model kept the placeholder in 6 of 6 test generations -- and nothing in the
+Chiron log pointed at the popup that had run earlier.
+
+Nine slots because parse_says is used with indices 0-8 across the engine and
+Thinker; saving a couple more costs nothing on the stack and cannot be wrong.
+*/
+#define CH_PARSE_SLOTS 10
+
+typedef struct {
+    char256 slot[CH_PARSE_SLOTS];
+    int gender;
+    int plural;
+} syn_parse_state_t;
+
+static void parse_state_save(syn_parse_state_t* st) {
+    for (int i = 0; i < CH_PARSE_SLOTS; i++) {
+        st->slot[i] = ParseStrBuffer[i];
+    }
+    st->gender = *GenderDefault;
+    st->plural = *PluralDefault;
+}
+
+static void parse_state_restore(const syn_parse_state_t* st) {
+    for (int i = 0; i < CH_PARSE_SLOTS; i++) {
+        ParseStrBuffer[i] = st->slot[i];
+    }
+    *GenderDefault = st->gender;
+    *PluralDefault = st->plural;
+}
+
 // One-line popup through Thinker's stock #GENERIC block: caption plus a line.
 static void chiron_notice(const char* caption, const char* text) {
+    syn_parse_state_t saved;
+    parse_state_save(&saved);
     parse_says(0, caption, -1, -1);
     parse_says(1, text, -1, -1);
     popp("modmenu", "GENERIC", 0, 0, 0);
+    parse_state_restore(&saved);
 }
 
 // ── probe protests ─────────────────────────────────────────────────────────
@@ -2330,6 +2393,8 @@ void chiron_check_thefts(int faction_id) {
             continue;   // they are already under a warning they accepted
         }
 
+        syn_parse_state_t saved;
+        parse_state_save(&saved);
         parse_says(0, MFactions[i].formal_name_faction, -1, -1);
         int stand = standing_with(i, faction_id);
         parse_says(1, stand == CH_STAND_PACT
@@ -2340,7 +2405,9 @@ void chiron_check_thefts(int faction_id) {
               "defiance of our treaty. Demand that they stop?"
             : "Their probe teams have been caught operating against us. "
               "Demand that they stop?", -1, -1);
-        if (X_pop("CHIRONPROBE", 0)) {
+        bool demand = X_pop("CHIRONPROBE", 0);
+        parse_state_restore(&saved);
+        if (demand) {
             run_protest(i, faction_id);
         }
     }
@@ -2639,12 +2706,15 @@ placeholder reminder does: the close of the prompt is what carries.
         return;
     }
 
+    syn_parse_state_t saved;
+    parse_state_save(&saved);
     parse_says(0, "Planetnet", -1, -1);
     for (int i = 0; i < CH_NEWS_LINES; i++) {
         parse_says(i + 1, i < count ? lines[i] : "", -1, -1);
     }
     ch_log("[news] dispatch, %d lines\n", count);
     popp("modmenu", "CHIRONNEWS", 0, 0, 0);
+    parse_state_restore(&saved);
 }
 
 static bool chiron_ready = false;
