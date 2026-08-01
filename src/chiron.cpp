@@ -1160,6 +1160,114 @@ static int variation_counter() {
     return ++n;
 }
 
+/*
+What has actually passed between these two, in the speaker's own terms.
+
+Without this every popup is stateless: persona, the vanilla line, the year. A
+leader who lost two bases to you last turn opens exactly like one you have never
+met, which is the real reason canned dialogue stops registering -- not that the
+words repeat, but that nothing in them follows from the game being played.
+
+NONE of this is recorded by us. The engine already keeps a full per-pair record
+in the Faction struct and writes it into the save, so reading it at prompt time
+is free, cannot drift out of sync with the game, and survives save/load with no
+serialisation of ours. Only fields whose meaning is documented in engine_types.h
+are used; the ones marked "?" there are left alone.
+
+Directions are easy to get backwards and are worth stating: for the speaker s
+and the listener l, `Factions[s].diplo_wrongs[l]` counts times S WRONGED L, and
+`Factions[s].diplo_betrayed[l]` counts times L BETRAYED S.
+
+Lines are emitted only when they have something to say, so a first meeting
+carries no history and does not pretend to.
+*/
+static void build_dossier(int speaker, int listener, char* out, size_t out_len) {
+    out[0] = '\0';
+    if (speaker < 1 || speaker >= MaxPlayerNum
+        || listener < 1 || listener >= MaxPlayerNum || speaker == listener) {
+        return;
+    }
+    const Faction& s = Factions[speaker];
+    const Faction& l = Factions[listener];
+    size_t n = 0;
+
+    #define DOSSIER(...) \
+        n = strlen(out); \
+        snprintf(out + n, n < out_len ? out_len - n : 0, __VA_ARGS__)
+
+    int status = s.diplo_status[listener];
+    if (status & DIPLO_PACT) {
+        DOSSIER("- They are your pact ally.\n");
+    } else if (status & DIPLO_TREATY) {
+        DOSSIER("- You hold a treaty of friendship with them.\n");
+    } else if (status & DIPLO_VENDETTA) {
+        DOSSIER("- You are at VENDETTA with them. Blood has been spilled.\n");
+    } else if (status & DIPLO_TRUCE) {
+        DOSSIER("- You have a truce with them, nothing warmer.\n");
+    } else {
+        DOSSIER("- You have no formal standing with them.\n");
+    }
+    if (status & DIPLO_WANT_REVENGE) {
+        DOSSIER("- You want revenge on them.\n");
+    }
+    if (status & DIPLO_HAVE_SURRENDERED) {
+        DOSSIER("- You have submitted to them as your master.\n");
+    }
+    if (status & DIPLO_MAJOR_ATROCITY_VICTIM) {
+        DOSSIER("- They committed a MAJOR ATROCITY against your people. You have not forgotten.\n");
+    } else if (status & DIPLO_ATROCITY_VICTIM) {
+        DOSSIER("- They committed an atrocity against your people.\n");
+    }
+
+    if (s.diplo_spoke[listener] < 0) {
+        DOSSIER("- You have never spoken with them before. This is the first time.\n");
+    } else if (*CurrentTurn - s.diplo_spoke[listener] > 20) {
+        DOSSIER("- You have not spoken in %d turns.\n",
+            *CurrentTurn - s.diplo_spoke[listener]);
+    }
+
+    if (s.diplo_betrayed[listener] > 0) {
+        DOSSIER("- They have broken their word to you %d time%s.\n",
+            s.diplo_betrayed[listener], s.diplo_betrayed[listener] > 1 ? "s" : "");
+    }
+    if (s.diplo_wrongs[listener] > 0) {
+        DOSSIER("- You have broken your word to them %d time%s.\n",
+            s.diplo_wrongs[listener], s.diplo_wrongs[listener] > 1 ? "s" : "");
+    }
+    if (s.diplo_stolen_techs[listener] > 0) {
+        DOSSIER("- Their probe teams have stolen your research.\n");
+    }
+    if (s.diplo_mind_control[listener] > 0) {
+        DOSSIER("- They have used mind control against your people.\n");
+    }
+    if (s.diplo_gifts[listener] > 0) {
+        DOSSIER("- You have given them gifts and bribes worth %d energy.\n",
+            s.diplo_gifts[listener]);
+    }
+    if (s.loan_balance[listener] > 0) {
+        DOSSIER("- You still owe them %d energy on a loan.\n", s.loan_balance[listener]);
+    }
+    if (l.loan_balance[speaker] > 0) {
+        DOSSIER("- They still owe you %d energy on a loan.\n", l.loan_balance[speaker]);
+    }
+    if (l.major_atrocities > 0) {
+        DOSSIER("- They are known across Planet for atrocities.\n");
+    }
+
+    // ranking is the engine's own power order, 0 lowest to 7 highest.
+    if (l.ranking > s.ranking + 2) {
+        DOSSIER("- They are far stronger than you, and you know it.\n");
+    } else if (s.ranking > l.ranking + 2) {
+        DOSSIER("- You are far stronger than they are.\n");
+    }
+
+    #undef DOSSIER
+
+    if (!out[0]) {
+        strcpy_n(out, out_len, "- Nothing of note has passed between you.\n");
+    }
+}
+
 static void build_prompt(const Personality* p, const char* prose,
                          char tokens[][64], int token_count,
                          char* out, size_t out_len) {
@@ -1170,10 +1278,43 @@ static void build_prompt(const Personality* p, const char* prose,
                  "%s$%s", i ? ", " : "", tokens[i]);
     }
 
+    /*
+    The tokens whose loss actually discards the reply, repeated at the very end.
+
+    Listing them once among eight rules was not enough: the model writes "your
+    data on that technology" instead of "$TECH0", and the whole generation is
+    then thrown away for vanilla. Since the close of the prompt is what it
+    weighs most -- the same effect that made a trailing "Phrasing 3:" rule
+    produce a list of phrasings -- the reminder goes last, immediately before
+    the cue to speak. Measured over 12 generations: 9/12 kept, then 11/12.
+
+    Cosmetic tokens stay out of it. $NAME and $TITLE are dropped constantly and
+    on purpose, and crowding them in here would blunt the one instruction that
+    has to land.
+    */
+    char must_list[512] = {};
+    for (int i = 0; i < token_count; i++) {
+        if (is_cosmetic_token(tokens[i])) {
+            continue;
+        }
+        size_t used = strlen(must_list);
+        snprintf(must_list + used, sizeof(must_list) - used,
+                 "%s$%s", used ? ", " : "", tokens[i]);
+    }
+    char must_line[640] = {};
+    if (must_list[0]) {
+        snprintf(must_line, sizeof(must_line),
+            "These must appear in your reply exactly as written: %s\n\n",
+            must_list);
+    }
+
     const char* listener_name = "another faction";
     if (listener_faction >= 1 && listener_faction < MaxPlayerNum) {
         listener_name = MFactions[listener_faction].formal_name_faction;
     }
+
+    char dossier[1024];
+    build_dossier(speaker_faction, listener_faction, dossier, sizeof(dossier));
 
     snprintf(out, out_len,
 /*
@@ -1193,6 +1334,8 @@ whole payload and stays; the scaffolding around it does not need to be prose.
 "You favour %s and refuse %s.\n"
 "Your voice: \"%s\"\n"
 "Speaking to %s, mission year %d, turn %d.\n"
+"\n"
+"WHAT HAS PASSED BETWEEN YOU:\n%s"
 /*
 The variation counter belongs HERE, in the context, and not at the end as a rule.
 
@@ -1219,9 +1362,19 @@ looking like a list that wants finishing.
 "phrase is left behind.\n"
 "- At most 3 sentences, and shorter than the message above.\n"
 "- Say it once. Do not restate the same point in other words.\n"
+/*
+Tone first, recital second. Told only to "use the history", a 7B opens every
+line with a grievance inventory; what makes a leader feel like they remember is
+that a betrayal has soured how they greet you, not that they read the ledger
+back to you.
+*/
+"- You remember what has passed between you, and it colours how warmly you "
+"speak. Name a specific grievance or debt only where it fits what you are "
+"already saying; never list them.\n"
 "- Output the message itself and nothing else: no preamble, no notes, no "
 "alternatives, no lists.\n"
 "\n"
+"%s"
 /*
 End on a cue to speak, not on the last rule. A prompt that stops after a bullet
 invites another bullet; one that stops after a label invites the thing the label
@@ -1232,9 +1385,11 @@ names.
         p->background, p->ideology, p->goal, p->adjectives,
         p->accusation, p->mockery, p->preferred, p->aversion, p->blurb,
         listener_name, *CurrentMissionYear, *CurrentTurn,
+        dossier,
         variation_counter(),
         prose,
-        token_count ? token_list : "(none)");
+        token_count ? token_list : "(none)",
+        must_line);
 }
 
 // ── the rewrite ────────────────────────────────────────────────────────────
