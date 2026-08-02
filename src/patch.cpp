@@ -795,6 +795,14 @@ bool patch_setup(Config* cf) {
     write_call(0x54C6DB, (int)chiron_diplo_first_item);
     write_call(0x54C910, (int)chiron_diplo_close);
     write_call(0x54C922, (int)chiron_diplo_exec);
+    /*
+    Chiron Rising: the same option on the end of each leader's own dialog box.
+    0x62777C is the BasePop_exec_3 inside 0x6276A0, the shared worker every
+    X_pop variant funnels into, and the one the diplomacy speech popups reach
+    by way of 0x5BF7D0 -> 0x5BF930. Gated on an id our rewrite armed, so the
+    other callers of that worker pass straight through.
+    */
+    write_call(0x62777C, (int)chiron_speech_exec);
     write_call(0x54F7D7, (int)mod_energy_trade);
     write_call(0x54F77E, (int)mod_base_swap);
     write_call(0x542278, (int)mod_buy_tech);

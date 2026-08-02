@@ -490,6 +490,23 @@ is normally the line still on screen, but "normally" is not a guarantee.
 static char chiron_last_said[1024];
 static int chiron_last_speaker = -1;
 
+/*
+The option index "Say something." was written at, for the popup about to open.
+
+Armed by chiron_rewrite_block when it appends the line and consumed by the very
+next popup exec, which is that block's -- the engine builds the dialog out of
+the file it has just read and shows it immediately, with nothing in between.
+One-shot on purpose: a block whose popup never reaches our hook must not leave
+an id lying around for someone else's dialog to match by accident.
+*/
+static int say_option_id = -1;
+static int say_option_speaker = -1;
+static int say_option_listener = -1;
+
+// The button itself. Quoted like the vanilla replies around it, which are the
+// player's own words rather than a description of what pressing it does.
+#define CH_SAY_OPTION "\"A word, before you go . . .\""
+
 void chiron_set_speakers(int faction1, int faction2) {
     chiron_ensure_init();
     /*
@@ -2063,6 +2080,39 @@ FILE* chiron_rewrite_block(FILE* src, const char* label) {
         return NULL;
     }
 
+    /*
+    Whether "Say something." can go on the end of THIS block's buttons.
+
+    velle: "i think it should be in each dialog box appended at the end as a
+    bonus option." The conversation was reachable only from the diplomacy list,
+    and the remarks worth answering are the ones that arrive unbidden -- an
+    accusation, a boast about a prototype, a warning about who you are seen
+    with. Those are popups with an OK and nothing else, so the answer to them
+    was to press OK.
+
+    The tail after the body is the button list: a blank line and then one option
+    per line. Ours goes after the last of them, so every id the engine wrote for
+    itself keeps the number it had and only a new one is added on the end -- the
+    same reason the diplomacy list could take a tenth line. #itemlist is the
+    exception and is skipped: there the buttons are built in code from another
+    block (#DIPLO draws #DIPLOMENU), so there is no list here to append to, and
+    that one already has the option by its own route.
+    */
+    int opt_count = 0;
+    int tail_end = body_end;
+    bool tail_is_coded = false;
+    for (int i = body_end; i < line_count; i++) {
+        if (is_control_line(lines[i])) {
+            tail_is_coded = true;
+        } else if (lines[i][0]) {
+            opt_count++;
+            tail_end = i + 1;   // trailing blanks are dropped so ours lands last
+        }
+    }
+    bool offer_say = !tail_is_coded
+        && listener_faction >= 1
+        && listener_faction != speaker_faction;
+
     FILE* out = fopen(CH_GEN_FILE, "wt");
     if (!out) {
         return NULL;
@@ -2085,8 +2135,26 @@ FILE* chiron_rewrite_block(FILE* src, const char* label) {
         }
         s = nl + 1;
     }
-    for (int i = body_end; i < line_count; i++) {
+    for (int i = body_end; i < (offer_say ? tail_end : line_count); i++) {
         fprintf(out, "%s\n", lines[i]);
+    }
+    if (offer_say) {
+        /*
+        A block with no buttons of its own is the common case -- 371 of the 507
+        quoted-speech blocks in Script.txt -- and the engine gives those a
+        single default button. Naming it costs a word and buys the second line;
+        it is still index 0, so a caller that reads the result at all reads the
+        same 0 it read before.
+        */
+        if (!opt_count) {
+            fprintf(out, "\nVery well.\n");
+        }
+        fprintf(out, "%s\n", CH_SAY_OPTION);
+        say_option_id = opt_count ? opt_count : 1;
+        say_option_speaker = speaker_faction;
+        say_option_listener = listener_faction;
+    } else {
+        say_option_id = -1;
     }
     fprintf(out, "\n#CHIRONEND\n");
     fclose(out);
@@ -2622,25 +2690,58 @@ static bool speak_and_offer(const char* caption, const char* text,
 /*
 Take a line of the player's own text. Returns false if they said nothing.
 
+TWO THINGS ABOUT THE ENGINE'S FIELD, BOTH OF WHICH THIS GOT WRONG FIRST TIME --
+velle: "typing a thing in didn't seem to get a response."
+
+The BUFFER ARGUMENT IS THE FIELD'S INITIAL CONTENTS, NOT AN OUT PARAMETER. The
+typed text is written to ParseStrBuffer[0] (0x9BB5E8), the engine's own
+substitution slot 0. That is visible in both users of the widget: #CHATASK
+passes its previous message as the buffer and then reads 0x9BB5E8 to decide
+what to send, and the number variant at 0x6279C0 formats the default value into
+its buffer with itoa on the way in and atoi's 0x9BB5E8 on the way out into
+ParseNumTable[0]. Reading back the buffer we handed in returns exactly what we
+put there, which is nothing.
+
+Because slot 0 IS the answer, the caption cannot live there: #CHIRONSAY carries
+it in $MSG1 and slot 0 goes in empty, so whatever comes back is the player's or
+the field was left alone. Read it BEFORE parse_state_restore, which puts the
+whole table back.
+
+AND ZERO IS OK. The return is the option index, the same as every other popup,
+so the accept button is 0 and anything else -- cancel, or -1 from a popup that
+would not open -- is a refusal. `if (!ok) return false` had it exactly
+backwards: it bailed out on precisely the case where the player had typed
+something and pressed the button.
+
 Flattened to a single line before it goes anywhere: the field is single-line
 already, but the value reaches a prompt where a newline would let typed text
 pose as one of our own section headings.
 */
 static bool ask_player_line(const char* caption, char* out, size_t out_len) {
-    char buf[CH_SAY_LEN + 8];
-    buf[0] = '\0';
+    char initial[CH_SAY_LEN + 8];
+    initial[0] = '\0';
 
     syn_parse_state_t saved;
     parse_state_save(&saved);
-    parse_says(0, caption, -1, -1);
-    int ok = X_pop_ask_6("modmenu", "CHIRONSAY", CH_SAY_LEN, buf, 0, 0);
+    parse_says(0, "", -1, -1);        // slot 0 is the answer, so start it empty
+    parse_says(1, caption, -1, -1);
+    int rc = X_pop_ask_6("modmenu", "CHIRONSAY", CH_SAY_LEN, initial, 0, 0);
+
+    char typed[CH_SAY_LEN + 8];
+    strcpy_n(typed, sizeof(typed), ParseStrBuffer[0].str);
     parse_state_restore(&saved);
-    if (!ok) {
+    /*
+    Unconditional, because a field that comes back empty and a field that was
+    never filled in are the same silence from the seat, and the log is the only
+    place they can be told apart.
+    */
+    chiron_trace("say: rc=%d typed \"%s\"\n", rc, typed);
+    if (rc != 0) {
         return false;
     }
     size_t n = 0;
     bool gap = false;
-    for (const char* p = buf; *p && n + 1 < out_len; p++) {
+    for (const char* p = typed; *p && n + 1 < out_len; p++) {
         unsigned char c = (unsigned char)*p;
         if (c == '\n' || c == '\r' || c == '\t' || c == ' ') {
             gap = (n > 0);
@@ -2778,8 +2879,16 @@ Run the exchange. `opening` is what the leader has just said.
 Returns when the player stops answering, the model stops producing, or the turn
 budget runs out -- the budget being there so a conversation cannot become an
 unbounded stall in front of a game that is waiting on it.
+
+`show_opening` is false when the caller is the popup that just showed the
+opening line. From the diplomacy list the player has not seen it -- the list is
+all they are looking at -- so it has to be put in front of them with the offer
+to answer. From a leader's own dialog box they have just read it and pressed
+the button that says so, and repeating it verbatim in a second box would read
+as the leader saying the same thing twice.
 */
-void chiron_converse(int speaker, int listener, const char* opening) {
+static void converse_run(int speaker, int listener, const char* opening,
+                         bool show_opening) {
     chiron_ensure_init();
     const Personality* p = find_personality(speaker);
     if (!chiron_conf.enabled || !p || !opening || !opening[0]) {
@@ -2795,7 +2904,9 @@ void chiron_converse(int speaker, int listener, const char* opening) {
 
     for (int turn = 0; turn < CH_CONV_TURNS; turn++) {
         bool last = (turn == CH_CONV_TURNS - 1);
-        if (!speak_and_offer(caption, line, !last)) {
+        if (turn == 0 && !show_opening) {
+            // They came here from the box that said it; go straight to the field.
+        } else if (!speak_and_offer(caption, line, !last)) {
             return;
         }
         char said[CH_SAY_LEN + 8];
@@ -2856,6 +2967,14 @@ void chiron_converse(int speaker, int listener, const char* opening) {
         ch_log("[converse] %s exchange %d\n", MFactions[speaker].filename, turn + 1);
     }
     speak_and_offer(caption, line, false);
+}
+
+void chiron_converse(int speaker, int listener, const char* opening) {
+    converse_run(speaker, listener, opening, true);
+}
+
+void chiron_converse_reply(int speaker, int listener, const char* opening) {
+    converse_run(speaker, listener, opening, false);
 }
 
 // ── the diplomacy menu's own option ────────────────────────────────────────
@@ -2955,6 +3074,57 @@ int __thiscall chiron_diplo_exec(BasePop* This, int a2, int a3) {
         parse_state_restore(&saved);
     }
     diplo_list = NULL;
+    return 0;
+}
+
+// ── the same option on the leader's own dialog box ─────────────────────────
+
+/*
+Consume the id chiron_rewrite_block appended, wherever the popup came from.
+
+The diplomacy list could be extended in place because diplomacy_menu builds it
+one Dialogs_item at a time and there is exactly one of it. A speech block is
+not built that way: the engine reads the whole block -- body and buttons -- in
+BasePop_start (0x601BF0) and the buttons are just lines in the file. So the
+option is added by writing it into the file, and this is the other half: the
+exec that turns the chosen index back into an outcome.
+
+ONE CALL SITE COVERS ALL OF THEM. The diplomacy speech popups go
+0x5BF7D0 -> 0x5BF930 -> 0x6276A0, and 0x6276A0 is the shared worker behind
+every X_pop variant (X_pop, X_pop_2, X_pop_3 all funnel through 0x5BF480 ->
+0x6272C0 -> 0x6276A0). Its BasePop_exec_3 is at 0x62777C, and that is the only
+place any of them read a button. Note this is NOT the same path as popp
+(0x48C0A0), which builds its own popup object -- our own #GENERIC notices go
+that way and never reach here.
+
+Gated on a one-shot id so the other twenty-nine callers of the worker are
+untouched: unless the block whose dialog this is had the line written into it,
+`id` is -1 and every choice goes straight back to the engine. The conversation's
+own popups re-enter here for the same reason, and pass through for the same one.
+*/
+int __thiscall chiron_speech_exec(BasePop* This, int a2, int a3) {
+    int id = say_option_id;
+    int speaker = say_option_speaker;
+    int listener = say_option_listener;
+    say_option_id = -1;
+
+    for (int guard = 0; guard < 32; guard++) {
+        int choice = BasePop_exec_3(This, a2, a3);
+        if (id < 0 || choice != id) {
+            return choice;
+        }
+        /*
+        Re-show rather than return, exactly as the diplomacy list does: the
+        engine only ever sees an index it wrote itself, so a block whose buttons
+        are a decision still gets that decision made afterwards. And save the
+        substitution slots around it -- the dialog we are standing inside owns
+        them, and the conversation opens popups that write their own.
+        */
+        syn_parse_state_t saved;
+        parse_state_save(&saved);
+        chiron_converse_reply(speaker, listener, chiron_last_said);
+        parse_state_restore(&saved);
+    }
     return 0;
 }
 

@@ -162,6 +162,22 @@ safe to call after an outcome has already been decided.
 void chiron_converse(int speaker, int listener, const char* opening);
 
 /*
+The same conversation, entered from the popup that just showed `opening`, so
+the line is not put back on screen before the field. See converse_run.
+*/
+void chiron_converse_reply(int speaker, int listener, const char* opening);
+
+/*
+"A word, before you go . . ." on the end of a leader's own dialog box.
+
+The button is written into the block by chiron_rewrite_block; this consumes the
+index it was written at and re-shows the same popup afterwards. Patched over the
+BasePop_exec_3 at 0x62777C, the single exec behind every X_pop variant -- see
+chiron.cpp for why that one address covers all of the speech popups.
+*/
+int __thiscall chiron_speech_exec(BasePop* This, int a2, int a3);
+
+/*
 Confront a faction over a probe team caught in the act, from the interception
 popup in veh_action.cpp. Returns true if they agreed to call their teams off.
 
