@@ -2795,7 +2795,18 @@ void chiron_check_thefts(int faction_id) {
               "defiance of our treaty. Demand that they stop?"
             : "Their probe teams have been caught operating against us. "
               "Demand that they stop?", -1, -1);
-        bool demand = X_pop("CHIRONPROBE", 0);
+        /*
+        X_pop_2, because bare X_pop looks in the WRONG FILE.
+
+        gui_dialog.cpp:26 -- `X_pop(label, fn)` forwards to
+        `X_pop_9(ScriptFile, ...)`, and ScriptFile is Script.txt. Every stock
+        caller relies on that: #VERYLARGEMAP, #TIMELIMIT and #RETIREWARNING are
+        all Script.txt labels. Ours are not. #CHIRONPROBE lives in modmenu.txt,
+        so the lookup was for a label that file has never contained, and the
+        confrontation could not have appeared even once -- there is no error
+        for it either, which is why it read as "the feature never triggers".
+        */
+        bool demand = X_pop_2("modmenu", "CHIRONPROBE", 0);
         parse_state_restore(&saved);
         if (demand) {
             run_protest(i, faction_id);
@@ -3402,7 +3413,9 @@ void chiron_show_menu() {
         parse_says(6, t_names, -1, -1);
         parse_says(7, t_probe, -1, -1);
 
-        int choice = X_pop("CHIRONMENU", 0);
+        // Named file, for the reason given at the probe confrontation: bare
+        // X_pop resolves against Script.txt, and this label is in modmenu.txt.
+        int choice = X_pop_2("modmenu", "CHIRONMENU", 0);
         if (choice == 1) {
             dispatch = true;
             break;
