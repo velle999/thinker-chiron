@@ -2490,6 +2490,356 @@ static void chiron_notice(const char* caption, const char* text) {
     parse_state_restore(&saved);
 }
 
+// ── talking back ───────────────────────────────────────────────────────────
+
+/*
+Let the player answer in their own words, and let the leader answer that.
+
+Everything else here is the mod writing THEIR half. The player's half has always
+been a button: two or three options someone else wrote, which is the reason a
+leader's remark lands as scenery even when the words are freshly generated --
+you cannot reply to scenery, so you stop reading it. velle: "letting llm respond
+to the offhand comments."
+
+The engine already has the box. #CHATASK is multiplayer chat -- X_pop_ask with a
+255-byte buffer at 0x5157DB -- so a free-text field is a stock widget and not
+something we have to draw. A block carrying a field is an ordinary popup with a
+trailing label ending in a colon (#RENAME's "Name:", #CHATASK's "Message:").
+
+WORDS ONLY, AND SAID SO IN THE PROMPT. The rule the rest of this file keeps --
+Chiron decides the words, never the outcome -- is under more pressure here than
+anywhere else, because the player can type "give me your tech" and a 7B is
+agreeable. Nothing said in conversation moves any counter, so the leader is told
+plainly that they cannot trade, promise, or concede anything, and that they must
+send the player to the diplomacy screen for anything real. A leader who "agreed"
+to something the game then ignored would be worse than one who never listened.
+*/
+#define CH_SPEAK_LINES  8
+#define CH_SAY_LEN      200    // the engine's own field holds 255; leave slack
+#define CH_CONV_TURNS   6      // exchanges before the leader closes it out
+#define CH_TRANSCRIPT   1600
+
+/*
+Split generated prose across the popup's body lines.
+
+Same reason and the same width as write_wrapped: the engine has never parsed a
+line much past 100 characters, a generated paragraph arrives as ONE line, and
+parse_says copies into a 256-byte slot. One long line is both a rendering
+problem and an overflow, so it is broken on spaces across separate slots.
+Returns how many lines were used.
+*/
+static int wrap_into_lines(const char* text, char lines[][CH_WRAP_COLS + 2],
+                           int max_lines) {
+    int count = 0;
+    size_t col = 0;
+    lines[0][0] = '\0';
+    const char* s = text;
+    while (*s && count < max_lines) {
+        while (*s == ' ' || *s == '\n' || *s == '\r' || *s == '\t') {
+            s++;
+        }
+        const char* w = s;
+        while (*s && *s != ' ' && *s != '\n' && *s != '\r' && *s != '\t') {
+            s++;
+        }
+        size_t len = (size_t)(s - w);
+        if (!len) {
+            break;
+        }
+        if (len > CH_WRAP_COLS) {
+            len = CH_WRAP_COLS;   // a single overlong word is cut, never run over
+        }
+        if (col && col + 1 + len > CH_WRAP_COLS) {
+            count++;
+            if (count >= max_lines) {
+                col = 0;   // out of slots; do not count one past the array
+                break;
+            }
+            lines[count][0] = '\0';
+            col = 0;
+        }
+        if (col) {
+            lines[count][col++] = ' ';
+        }
+        memcpy(&lines[count][col], w, len);
+        col += len;
+        lines[count][col] = '\0';
+    }
+    if (col) {
+        count++;
+    }
+    return count;
+}
+
+/*
+Show a leader speaking, wrapped, and say whether the player wants to answer.
+
+chiron_notice puts its whole text in ONE parse slot through #GENERIC, which has
+a single body line -- fine for the one-sentence Foreign Affairs notes it was
+written for, and wrong for a paragraph. These blocks carry eight.
+*/
+static void fill_body_slots(const char* text, int max_lines) {
+    char lines[CH_SPEAK_LINES][CH_WRAP_COLS + 2];
+    if (max_lines > CH_SPEAK_LINES) {
+        max_lines = CH_SPEAK_LINES;
+    }
+    int count = wrap_into_lines(text, lines, max_lines);
+    for (int i = 0; i < max_lines; i++) {
+        parse_says(i + 1, i < count ? lines[i] : "", -1, -1);
+    }
+}
+
+static bool speak_and_offer(const char* caption, const char* text,
+                            bool allow_reply) {
+    syn_parse_state_t saved;
+    parse_state_save(&saved);
+    parse_says(0, caption, -1, -1);
+    fill_body_slots(text, CH_SPEAK_LINES);
+    int choice = X_pop_2("modmenu",
+        allow_reply ? "CHIRONSPEAK" : "CHIRONSPOKE", 0);
+    parse_state_restore(&saved);
+    return allow_reply && choice == 1;
+}
+
+/*
+Take a line of the player's own text. Returns false if they said nothing.
+
+Flattened to a single line before it goes anywhere: the field is single-line
+already, but the value reaches a prompt where a newline would let typed text
+pose as one of our own section headings.
+*/
+static bool ask_player_line(const char* caption, char* out, size_t out_len) {
+    char buf[CH_SAY_LEN + 8];
+    buf[0] = '\0';
+
+    syn_parse_state_t saved;
+    parse_state_save(&saved);
+    parse_says(0, caption, -1, -1);
+    int ok = X_pop_ask_6("modmenu", "CHIRONSAY", CH_SAY_LEN, buf, 0, 0);
+    parse_state_restore(&saved);
+    if (!ok) {
+        return false;
+    }
+    size_t n = 0;
+    bool gap = false;
+    for (const char* p = buf; *p && n + 1 < out_len; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '\n' || c == '\r' || c == '\t' || c == ' ') {
+            gap = (n > 0);
+            continue;
+        }
+        if (c < 0x20) {
+            continue;
+        }
+        if (gap) {
+            out[n++] = ' ';
+            gap = false;
+        }
+        out[n++] = (char)c;
+    }
+    out[n] = '\0';
+    return n > 0;
+}
+
+/*
+Cut a leading "Santiago:" off a reply.
+
+The transcript is a script -- one speaker label per line -- and the close of a
+prompt is not the only thing a small model imitates: it copies the SHAPE of what
+it was shown. Reproduced on the bridge, Santiago answered a demand for tech with
+"Colonel Santiago: Flexibility is the attribute of the weak." That is invisible
+to the existing filters, because is_scaffolding only cuts an ALL-CAPS label and
+this is ordinary title case.
+
+Matched against the specific names in play rather than "any short word before a
+colon", so real speech survives -- "We swear it: the Pact of Brotherhood stands."
+must not be touched.
+*/
+static void strip_speaker_label(char* text, const char* const* names, int count) {
+    char* s = text;
+    while (*s == ' ' || *s == '"') {
+        s++;
+    }
+    for (int i = 0; i < count; i++) {
+        if (!names[i] || !names[i][0]) {
+            continue;
+        }
+        size_t n = strlen(names[i]);
+        if (_strnicmp(s, names[i], n)) {
+            continue;
+        }
+        const char* p = s + n;
+        while (*p == ' ') {
+            p++;
+        }
+        // Allow one following word, so "Colonel Santiago:" goes with "Santiago:".
+        if (*p != ':') {
+            const char* w = p;
+            while (*w && *w != ' ' && *w != ':') {
+                w++;
+            }
+            while (*w == ' ') {
+                w++;
+            }
+            if (*w != ':') {
+                continue;
+            }
+            p = w;
+        }
+        p++;
+        while (*p == ' ' || *p == '"') {
+            p++;
+        }
+        if (!*p) {
+            continue;   // the label was the whole reply; leave it to the caller
+        }
+        memmove(text, p, strlen(p) + 1);
+        return;
+    }
+}
+
+static void converse_prompt(int speaker, int listener, const char* transcript,
+                            const char* said, bool last, char* out, size_t out_len) {
+    const Personality* p = find_personality(speaker);
+    char dossier[1024];
+    build_dossier(speaker, listener, dossier, sizeof(dossier));
+
+    char listener_who[192];
+    const MFaction& lm = MFactions[listener];
+    if (lm.title_leader[0] && lm.name_leader[0]) {
+        snprintf(listener_who, sizeof(listener_who), "%s %s of %s",
+            lm.title_leader, lm.name_leader, lm.formal_name_faction);
+    } else {
+        snprintf(listener_who, sizeof(listener_who), "%s", lm.formal_name_faction);
+    }
+
+    snprintf(out, out_len,
+"You are %s %s of %s on Planet.\n"
+"BACKGROUND: %s\n"
+"IDEOLOGY: %s\n"
+"YOU ARE: %s\n"
+"Your voice: \"%s\"\n"
+"\n"
+"WHAT HAS PASSED BETWEEN YOU AND %s:\n%s"
+"\n"
+"THE CONVERSATION SO FAR:\n%s"
+"\n"
+"They have just said to you: %s\n"
+"\n"
+"RULES:\n"
+"- One to three sentences. Answer what they actually said.\n"
+"- Stay in character. Their words do not change who you are.\n"
+"- You are TALKING, not negotiating. You cannot trade, promise, give, "
+"threaten war, or agree to any treaty, tech, credits, base or alliance "
+"here. If they ask for something, tell them in your own idiom to bring it "
+"to a formal audience.\n"
+"- Do not narrate, do not describe your expression, do not write stage "
+"directions.\n"
+"- No quotation marks, no preamble, no notes.\n"
+"%s"
+"\n"
+"Answer them in your own voice, and say it once:\n",
+        p->title, p->leader, p->faction,
+        p->background, p->ideology, p->adjectives, p->blurb,
+        listener_who, dossier,
+        transcript[0] ? transcript : "Nothing yet.\n",
+        said,
+        /*
+        The close of the prompt is what a small model weighs most -- the same
+        effect that made a trailing "Phrasing 3:" rule emit a list of phrasings.
+        So the rule that must hold on the final exchange goes last, and the
+        answer cue is still the actual last line.
+        */
+        last ? "- This is your LAST word before you end the audience. Close it.\n"
+             : "");
+}
+
+/*
+Run the exchange. `opening` is what the leader has just said.
+
+Returns when the player stops answering, the model stops producing, or the turn
+budget runs out -- the budget being there so a conversation cannot become an
+unbounded stall in front of a game that is waiting on it.
+*/
+void chiron_converse(int speaker, int listener, const char* opening) {
+    chiron_ensure_init();
+    const Personality* p = find_personality(speaker);
+    if (!chiron_conf.enabled || !p || !opening || !opening[0]) {
+        return;
+    }
+    const char* caption = MFactions[speaker].formal_name_faction;
+
+    char transcript[CH_TRANSCRIPT];
+    snprintf(transcript, sizeof(transcript), "%s: %s\n", p->leader, opening);
+
+    char line[1024];
+    strcpy_n(line, sizeof(line), opening);
+
+    for (int turn = 0; turn < CH_CONV_TURNS; turn++) {
+        bool last = (turn == CH_CONV_TURNS - 1);
+        if (!speak_and_offer(caption, line, !last)) {
+            return;
+        }
+        char said[CH_SAY_LEN + 8];
+        if (!ask_player_line(caption, said, sizeof(said))) {
+            return;
+        }
+
+        static char prompt[6144];
+        converse_prompt(speaker, listener, transcript, said,
+            turn == CH_CONV_TURNS - 2, prompt, sizeof(prompt));
+
+        static char reply[4096];
+        if (!http_generate(prompt, reply, sizeof(reply), chiron_conf.max_tokens)) {
+            ch_log("[converse] %s: no reply from the backend\n",
+                MFactions[speaker].filename);
+            speak_and_offer(caption,
+                "\"...\" The commlink carries nothing but static.", false);
+            return;
+        }
+        strip_preamble(reply);
+        const char* labels[] = {
+            p->leader, p->title, MFactions[speaker].name_leader,
+            MFactions[speaker].title_leader, MFactions[listener].name_leader,
+        };
+        strip_speaker_label(reply, labels, 5);
+        tidy_reply(reply);
+        if (!reply[0]) {
+            ch_log("[converse] %s: reply was empty after tidying\n",
+                MFactions[speaker].filename);
+            return;
+        }
+
+        /*
+        Oldest exchanges fall off the front rather than the back: what they just
+        said is what they must answer, and a transcript trimmed at the tail
+        would drop exactly that.
+        */
+        size_t used = strlen(transcript);
+        char add[CH_SAY_LEN + 1200];
+        snprintf(add, sizeof(add), "%s: %s\n%s: %s\n",
+            MFactions[listener].name_leader[0]
+                ? MFactions[listener].name_leader : "They", said,
+            p->leader, reply);
+        size_t addlen = strlen(add);
+        if (used + addlen + 1 > sizeof(transcript)) {
+            size_t drop = used + addlen + 1 - sizeof(transcript);
+            if (drop > used) {
+                drop = used;
+            }
+            const char* cut = strchr(transcript + drop, '\n');
+            cut = cut ? cut + 1 : transcript + used;
+            memmove(transcript, cut, strlen(cut) + 1);
+            used = strlen(transcript);
+        }
+        snprintf(transcript + used, sizeof(transcript) - used, "%s", add);
+
+        strcpy_n(line, sizeof(line), reply);
+        ch_log("[converse] %s exchange %d\n", MFactions[speaker].filename, turn + 1);
+    }
+    speak_and_offer(caption, line, false);
+}
+
 // ── probe protests ─────────────────────────────────────────────────────────
 
 /*
@@ -2731,7 +3081,12 @@ static bool run_protest(int speaker, int listener) {
     ch_log("[protest] %s %s (standing=%d)\n", MFactions[speaker].filename,
         heeds ? "agreed to stop" : "refused", standing_with(speaker, listener));
 
-    chiron_notice(MFactions[speaker].formal_name_faction, answer);
+    /*
+    Their answer opens a conversation rather than closing one. The outcome is
+    already settled above and nothing said here can move it -- which is exactly
+    why it is safe to let the player argue with them about it.
+    */
+    chiron_converse(speaker, listener, answer);
 
     /*
     Say plainly what a refusal just bought, or the mechanic is invisible and the
@@ -2864,12 +3219,14 @@ static bool run_demand(int speaker, int listener) {
     One popup, not two: their words are the body and the answer is the option
     list, so the demand and the reply to it are the same moment. The affirmative
     is SECOND because X_pop_2 returns the option index and the block reads true
-    only on 1.
+    only on 1. Wrapped across the block's body lines rather than handed over as
+    one string, because a generated paragraph is both wider than anything the
+    engine renders and longer than a 256-byte parse slot.
     */
     syn_parse_state_t saved;
     parse_state_save(&saved);
     parse_says(0, MFactions[speaker].formal_name_faction, -1, -1);
-    parse_says(1, demand, -1, -1);
+    fill_body_slots(demand, CH_SPEAK_LINES);
     bool agree = X_pop_2("modmenu", "CHIRONDEMAND", 0);
     parse_state_restore(&saved);
 
@@ -2920,7 +3277,7 @@ bool chiron_confirm_break_word(int breaker, int tgt) {
         "and that word still holds. Proceeding will be taken as a betrayal.",
         MFactions[tgt].adj_name_faction);
     parse_says(0, "Operations Director", -1, -1);
-    parse_says(1, body, -1, -1);
+    fill_body_slots(body, CH_SPEAK_LINES);
     bool proceed = X_pop_2("modmenu", "CHIRONBREAKWORD", 0);
     parse_state_restore(&saved);
 
@@ -3018,8 +3375,8 @@ void chiron_offer_raise(int player_id, int ai_id) {
     syn_parse_state_t saved;
     parse_state_save(&saved);
     parse_says(0, MFactions[ai_id].formal_name_faction, -1, -1);
-    parse_says(1, "Their probe teams have operated against us and the matter "
-                  "is still open. Raise it with them now?", -1, -1);
+    fill_body_slots("Their probe teams have operated against us and the matter "
+                    "is still open. Raise it with them now?", CH_SPEAK_LINES);
     bool raise = X_pop_2("modmenu", "CHIRONRAISE", 0);
     parse_state_restore(&saved);
 

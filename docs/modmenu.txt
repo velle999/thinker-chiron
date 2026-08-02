@@ -154,28 +154,86 @@ Eliminate them!
 Return them, and put their leader on the commlink.
 
 #CHIRONRAISE
-#xs 440
+#xs 450
 #caption $MSG0
 $MSG1
+$MSG2
+$MSG3
+$MSG4
+$MSG5
+$MSG6
+$MSG7
+$MSG8
 
 Get on with other business.
 Raise it with them now.
 
 #CHIRONDEMAND
-#xs 440
+#xs 450
 #caption $MSG0
 $MSG1
+$MSG2
+$MSG3
+$MSG4
+$MSG5
+$MSG6
+$MSG7
+$MSG8
 
 Refuse. Our probe teams answer to us alone.
 Give our word. Call them off.
 
 #CHIRONBREAKWORD
-#xs 440
+#xs 450
 #caption $MSG0
 $MSG1
+$MSG2
+$MSG3
+$MSG4
+$MSG5
+$MSG6
+$MSG7
+$MSG8
 
 Stand down. We gave our word.
 Proceed, and let them make of it what they will.
+
+#CHIRONSPEAK
+#xs 450
+#caption $MSG0
+$MSG1
+$MSG2
+$MSG3
+$MSG4
+$MSG5
+$MSG6
+$MSG7
+$MSG8
+
+Leave it there.
+Say something.
+
+#CHIRONSPOKE
+#xs 450
+#caption $MSG0
+$MSG1
+$MSG2
+$MSG3
+$MSG4
+$MSG5
+$MSG6
+$MSG7
+$MSG8
+
+Close the channel.
+
+#CHIRONSAY
+#xs 450
+#caption $MSG0
+#x 5
+#y 40
+#itemlist
+Say:
 
 #CHIRONMENU
 #xs 440

@@ -143,6 +143,16 @@ double-cross counters record it. Read by the probe gate in veh_action.cpp.
 bool chiron_confirm_break_word(int breaker, int tgt);
 
 /*
+Let the player answer a leader in their own words, and the leader answer that.
+
+`opening` is what the leader has just said. Runs until the player stops
+replying, the backend stops answering, or the exchange budget is spent. Nothing
+said here moves any counter -- the leader is told so in the prompt -- so it is
+safe to call after an outcome has already been decided.
+*/
+void chiron_converse(int speaker, int listener, const char* opening);
+
+/*
 Confront a faction over a probe team caught in the act, from the interception
 popup in veh_action.cpp. Returns true if they agreed to call their teams off.
 
