@@ -3297,6 +3297,221 @@ round trip.
     parse_state_restore(&saved);
 }
 
+// ── Future Society repricing ───────────────────────────────────────────────
+
+/*
+The one part of the mod that changes the RULES, and the only one you can throw
+mid-game and watch land.
+
+Count the pips in the stock #SOCIO table and every Future Society is +6 gross
+where nothing else clears +4. That row is not three options balanced against
+each other, it is a row strictly better than the row above it -- not a choice,
+a reward for reaching the tech.
+
+But the pip count understates it, because TWO OF THE THREE PENALTIES ARE NEVER
+PAID. social_calc() (faction.cpp:1191) zeroes EVERY negative on a Future
+Society model when the faction holds one project:
+
+    Cybernetic      + Network Backbone  -> negatives become 0
+    Thought Control + Cloning Vats      -> negatives become 0
+    Eudaimonic                          -> no clause; it always pays
+
+So Cybernetic and Thought Control are +6/0 for whoever lands the project. That
+inverts the obvious reading: Eudaimonic's +6/-2 looks like the outlier and is
+in fact the only one of the three whose cost is real, which is a reason to
+price it gently rather than to punish it. It gets ONE penalty here; the other
+two get two, and keep their project escape exactly as before.
+
+The clause zeroes any negative, not a nominated one, so moving a penalty from
+POLICE to GROWTH does not make it unbuyable. It changes what you lose until
+the project lands, and a project is singular -- for everyone who never builds
+it, that is the whole game.
+
+Modding this needs no code because the ROWS are data: social_calc reads
+SocialField[cat].soc_effect[model] on every recalculation, and Thinker's own
+mod_social_ai evaluates the resulting effect vector rather than the name, so
+the AI adapts to a re-cut row for free. The COLUMNS are the opposite -- eleven
+hardcoded meanings the engine reasons about directly -- which is why this
+changes which model grants what, and never what an effect is.
+*/
+struct SocioEdit {
+    int model;
+    int values[MaxSocialEffectNum];
+};
+
+/*
+Gross +4 on all three, the same as Police State, Democratic, Green and Power.
+The two with a project escape pay -4 until they reach it; Eudaimonic, which
+has none, pays -2 forever -- exactly what every other row in the table pays.
+
+Written out in full rather than as a diff, so what the row becomes is readable
+here without holding the stock values in your head.
+*/
+static const SocioEdit SocioRepriced[] = {
+    // ECON EFFIC SUPP TAL MOR POL GROW PLAN PROBE IND RES
+    { SOCIAL_M_CYBERNETIC,
+      {    0,   2,   0,  0,  0, -2,  -2,   0,    0,  0,  2 } },
+    { SOCIAL_M_EUDAIMONIC,
+      {    2,   0,   0,  0, -2,  0,   2,   0,    0,  0,  0 } },
+    { SOCIAL_M_THOUGHT_CONTROL,
+      {    0,   0,  -2,  0,  2,  2,   0,   0,    0,  0, -2 } },
+};
+
+/*
+The table as alphax.txt actually loaded it, whatever that was.
+
+Restoring from a hardcoded stock row would be a lie on any install that ran
+./install.sh --se-rebalance, where the file on disk already holds the new
+values -- "restore" has to mean "what this game started with", not "what the
+unmodded game ships".
+*/
+static CSocialEffect socio_loaded[MaxSocialModelNum];
+static bool socio_have_loaded = false;
+
+static void socio_snapshot() {
+    if (socio_have_loaded) {
+        return;
+    }
+    for (int m = 0; m < MaxSocialModelNum; m++) {
+        socio_loaded[m] = SocialField[SOCIAL_C_FUTURE].soc_effect[m];
+    }
+    socio_have_loaded = true;
+}
+
+static bool socio_is_repriced() {
+    for (auto& e : SocioRepriced) {
+        const CSocialEffect& live = SocialField[SOCIAL_C_FUTURE].soc_effect[e.model];
+        for (int i = 0; i < MaxSocialEffectNum; i++) {
+            if (live.values[i] != e.values[i]) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/*
+Recompute every faction's effect vector from the choices it already holds.
+
+Without this the new table sits there doing nothing until something else
+happens to recalculate -- the player would throw the switch, see the social
+screen change, and find their actual economy unchanged until next turn.
+
+NOT social_upkeep(), which is the turn-boundary routine and starts by copying
+pending over current. Calling it here would COMMIT a social change the player
+had chosen and not yet paid the upheaval for. Only the derived vectors are
+touched; every choice is left exactly as it was.
+*/
+static void socio_recalc() {
+    for (int i = 1; i < MaxPlayerNum; i++) {
+        if (!is_alive(i)) {
+            continue;
+        }
+        Faction* f = &Factions[i];
+        auto current = (CSocialCategory*)&f->SE_Politics;
+        auto pending = (CSocialCategory*)&f->SE_Politics_pending;
+        social_calc(current, (CSocialEffect*)&f->SE_economy, i, false, false);
+        social_calc(pending, (CSocialEffect*)&f->SE_economy_pending, i, false, false);
+        social_calc(pending, (CSocialEffect*)&f->SE_economy_2, i, true, false);
+    }
+}
+
+static void socio_set(bool repriced) {
+    socio_snapshot();
+    for (int m = 0; m < MaxSocialModelNum; m++) {
+        SocialField[SOCIAL_C_FUTURE].soc_effect[m] = socio_loaded[m];
+    }
+    if (repriced) {
+        for (auto& e : SocioRepriced) {
+            CSocialEffect& live = SocialField[SOCIAL_C_FUTURE].soc_effect[e.model];
+            for (int i = 0; i < MaxSocialEffectNum; i++) {
+                live.values[i] = e.values[i];
+            }
+        }
+    }
+    socio_recalc();
+    ch_log("[socio] Future Society table: %s\n", repriced ? "repriced" : "as loaded");
+}
+
+// "++EFFIC, --GROWTH, --POLICE" -- the row as the game currently holds it.
+static void socio_row(int model, char* out, size_t out_len) {
+    static const char* Names[MaxSocialEffectNum] = {
+        "ECONOMY", "EFFIC", "SUPPORT", "TALENT", "MORALE", "POLICE",
+        "GROWTH", "PLANET", "PROBE", "INDUSTRY", "RESEARCH"
+    };
+    const CSocialEffect& e = SocialField[SOCIAL_C_FUTURE].soc_effect[model];
+    out[0] = '\0';
+    for (int i = 0; i < MaxSocialEffectNum; i++) {
+        int v = e.values[i];
+        if (!v) {
+            continue;
+        }
+        char pips[8];
+        int n = v < 0 ? -v : v;
+        if (n > 5) {
+            n = 5;
+        }
+        for (int k = 0; k < n; k++) {
+            pips[k] = v < 0 ? '-' : '+';
+        }
+        pips[n] = '\0';
+        size_t used = strlen(out);
+        snprintf(out + used, out_len - used, "%s%s%s",
+            used ? ", " : "", pips, Names[i]);
+    }
+    if (!out[0]) {
+        strcpy_n(out, out_len, "no effects");
+    }
+}
+
+static void chiron_show_socio() {
+    socio_snapshot();
+
+    syn_parse_state_t saved;
+    parse_state_save(&saved);
+
+    for (;;) {
+        bool on = socio_is_repriced();
+
+        char cyber[128], eudaim[128], thought[128];
+        socio_row(SOCIAL_M_CYBERNETIC, cyber, sizeof(cyber));
+        socio_row(SOCIAL_M_EUDAIMONIC, eudaim, sizeof(eudaim));
+        socio_row(SOCIAL_M_THOUGHT_CONTROL, thought, sizeof(thought));
+
+        char l_cyber[160], l_eudaim[160], l_thought[160];
+        snprintf(l_cyber, sizeof(l_cyber), "Cybernetic: %s", cyber);
+        snprintf(l_eudaim, sizeof(l_eudaim), "Eudaimonic: %s", eudaim);
+        snprintf(l_thought, sizeof(l_thought), "Thought Control: %s", thought);
+
+        parse_says(1, l_cyber, -1, -1);
+        parse_says(2, l_eudaim, -1, -1);
+        parse_says(3, l_thought, -1, -1);
+        parse_says(4, on
+            ? "Repriced. Every row costs what the rest of the table costs."
+            : "The table as this game loaded it.", -1, -1);
+        /*
+        Say the two things that are genuinely surprising, in the place where
+        the decision is actually made. Both were buried in a text file nobody
+        reads before flipping a switch.
+        */
+        parse_says(5, "Network Backbone voids Cybernetic's penalties; Cloning "
+            "Vats voids Thought Control's. Eudaimonic always pays.", -1, -1);
+        parse_says(6, "This session only. install.sh --se-rebalance makes it "
+            "permanent.", -1, -1);
+        parse_says(7, on ? "Restore the table as loaded."
+                         : "Apply the repricing.", -1, -1);
+
+        int choice = X_pop_2("modmenu", "CHIRONSOCIO", 0);
+        if (choice == 1) {
+            socio_set(!on);
+        } else {
+            break;
+        }
+    }
+
+    parse_state_restore(&saved);
+}
+
 // ── the mod's own menu ─────────────────────────────────────────────────────
 
 /*
@@ -3409,9 +3624,14 @@ void chiron_show_menu() {
         parse_says(2, line2, -1, -1);
         parse_says(3, "Planetnet dispatch.", -1, -1);
         parse_says(4, "Test the connection now.", -1, -1);
+        char t_socio[64];
+        snprintf(t_socio, sizeof(t_socio), "Future Society repricing: %s...",
+            socio_is_repriced() ? "on" : "off");
+
         parse_says(5, t_dialogue, -1, -1);
         parse_says(6, t_names, -1, -1);
         parse_says(7, t_probe, -1, -1);
+        parse_says(8, t_socio, -1, -1);
 
         // Named file, for the reason given at the probe confrontation: bare
         // X_pop resolves against Script.txt, and this label is in modmenu.txt.
@@ -3433,6 +3653,15 @@ void chiron_show_menu() {
             chiron_conf.probe_protests = !chiron_conf.probe_protests;
             ch_log("[menu] probe protests %s\n",
                 chiron_conf.probe_protests ? "on" : "off");
+        } else if (choice == 6) {
+            /*
+            Opened from inside the loop, unlike the dispatch. It is a popup of
+            ours over a popup of ours, which the news dispatch deliberately
+            avoids -- but this one has to come back HERE, so that closing the
+            submenu returns to the menu you opened it from rather than to the
+            map. It saves and restores its own parse slots, so ours survive.
+            */
+            chiron_show_socio();
         } else {
             break;  // Close, or the box dismissed some other way.
         }

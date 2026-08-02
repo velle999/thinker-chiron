@@ -155,6 +155,21 @@ $MSG4
 $MSG5
 $MSG6
 $MSG7
+$MSG8
+
+#CHIRONSOCIO
+#xs 440
+#caption Future Society
+$MSG1
+$MSG2
+$MSG3
+^
+$MSG4
+$MSG5
+$MSG6
+
+Close.
+$MSG7
 
 #CHIRONNEWS
 #xs 440
