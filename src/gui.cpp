@@ -1487,6 +1487,35 @@ void __cdecl mod_diplomacy_caption(int faction1, int faction2)
 }
 
 /*
+Chiron Rising: let the player raise probe operations at a time of their choosing.
+
+The turn-start popup in chiron_check_thefts() is otherwise the only way into the
+confrontation, and it is a one-shot -- say nothing and the grievance is gone
+until they rob you again. So the offer is repeated at the top of the diplomacy
+conversation, where a player who has decided to bring it up would go looking.
+
+A WRAPPER, not an added menu item. The engine's own list is #DIPLOMENU, but
+diplomacy_menu() does not return the line the player picked: it returns an
+outcome in 0..7 which the caller at 0x558574 feeds straight into a jump table at
+0x5589bc. A ninth line would have nothing to dispatch to. Wrapping is free by
+comparison -- one call site in the whole binary, the return value is passed
+through untouched, and the engine's conversation is entered exactly as before.
+
+Argument order is the engine's: faction1 speaks (diplomacy_menu opens by putting
+MFactions[faction1].name_leader in parse slot 0), faction2 is the other party.
+Which of them is the human is not assumed, because diplomacy runs both ways.
+*/
+int __cdecl mod_diplomacy_menu(int faction1, int faction2)
+{
+    if (is_human(faction2) && !is_human(faction1)) {
+        chiron_offer_raise(faction2, faction1);
+    } else if (is_human(faction1) && !is_human(faction2)) {
+        chiron_offer_raise(faction1, faction2);
+    }
+    return diplomacy_menu(faction1, faction2);
+}
+
+/*
 Fix foreign_treaty_popup displaying same treaty changes multiple times per turn.
 In any case, these events will be displayed as a non-persistent message in map window.
 */

@@ -782,6 +782,8 @@ bool patch_setup(Config* cf) {
     write_call(0x4AED04, (int)SocialWin_social_ai);
     write_call(0x51D1C2, (int)Console_editor_fungus);
     write_call(0x54814D, (int)mod_diplomacy_caption);
+    // Chiron Rising: the only call site of diplomacy_menu in the binary.
+    write_call(0x558574, (int)mod_diplomacy_menu);
     write_call(0x54F7D7, (int)mod_energy_trade);
     write_call(0x54F77E, (int)mod_base_swap);
     write_call(0x542278, (int)mod_buy_tech);

@@ -143,6 +143,30 @@ $MSG1
 Say nothing.
 Demand that they call off their probe teams.
 
+#CHIRONRAISE
+#xs 440
+#caption $MSG0
+$MSG1
+
+Get on with other business.
+Raise it with them now.
+
+#CHIRONDEMAND
+#xs 440
+#caption $MSG0
+$MSG1
+
+Refuse. Our probe teams answer to us alone.
+Give our word. Call them off.
+
+#CHIRONBREAKWORD
+#xs 440
+#caption $MSG0
+$MSG1
+
+Stand down. We gave our word.
+Proceed, and let them make of it what they will.
+
 #CHIRONMENU
 #xs 440
 #caption Chiron Rising

@@ -2004,16 +2004,28 @@ int __cdecl order_veh(int veh_id, int offset, int flag) {
         if (Vehs[veh_id].plan() == PLAN_PROBE && tgt_fc_id >= 0 && veh_fc_id != tgt_fc_id) {
             bool check = true;
             /*
-            An AI faction that agreed to call its probe teams off does so.
+            A faction that agreed to call its probe teams off does so.
 
             This is what makes the protest in chiron.cpp mean anything: without
             it a leader could promise to stop and go on stealing, which would be
-            worse than never having offered the conversation. Human factions are
-            not bound -- the player made the demand, and holding them to a
-            promise they never gave is not the mod's business.
+            worse than never having offered the conversation.
+
+            It binds the PLAYER too, now that a leader can make the demand of
+            them -- a promise only one side can be held to is not a mechanic.
+            The two sides differ only in how the promise is discharged: an AI
+            simply keeps it, where the player is asked, because the player is
+            the one who chose to give their word and taking the choice back off
+            them would make it a lock rather than a decision. Breaking it is not
+            free; chiron_confirm_break_word() records it in the engine's own
+            double-cross counters, which the leader then raises unprompted.
             */
-            if (!is_human(veh_fc_id) && chiron_probe_warned(veh_fc_id, tgt_fc_id)) {
-                check = false;
+            if (chiron_probe_warned(veh_fc_id, tgt_fc_id)) {
+                if (is_human(veh_fc_id)) {
+                    check = (!move_delay && veh_fc_id == MapWin->cOwner)
+                        && chiron_confirm_break_word(veh_fc_id, tgt_fc_id);
+                } else {
+                    check = false;
+                }
             }
             if (*VehAttackFlags & 1) {
                 Vehs[veh_id].flags &= ~VFLAG_PROBE_PACT_OPERATIONS;

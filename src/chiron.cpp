@@ -2564,11 +2564,16 @@ bool chiron_probe_warned(int faction_id, int tgt_faction) {
 }
 
 /*
-Did tgt_faction refuse a warning from faction_id, recently enough to still be
+Did faction_id refuse a warning from tgt_faction, recently enough to still be
 grounds for war?
 
 Refusal is stored as a negative turn on the faction that refused, indexed by
-whoever warned them. It binds nothing by itself -- what it buys is the right to
+whoever warned them, so the subject of the question is the FIRST argument --
+mirroring chiron_probe_warned above, and matching the call in double_cross(),
+which passes the defender first because it is the defender's refusal that
+excuses the attacker. The heading on this comment used to say the opposite.
+
+It binds nothing by itself -- what it buys is the right to
 break off relations without the usual dishonour, which double_cross() grants by
 way of its own is_victim flag.
 
@@ -2743,41 +2748,337 @@ static bool run_protest(int speaker, int listener) {
 }
 
 /*
-Watch for thefts against the player and offer the confrontation.
+The same conversation with the sides swapped: they caught YOUR probe teams.
+
+Everything above answers the case where an AI robs the player. The mirror image
+was missing entirely, and from the seat that is the more visible half -- the
+dossier line at build_dossier() puts "their probe teams have stolen your
+research" into every prompt the moment you steal from someone, so leaders start
+raising it in ordinary conversation while nothing whatever follows from it. A
+grievance a faction states and can never act on is worse than one it never
+mentions, because the player can hear that the game has noticed and watch it do
+nothing.
+
+The asymmetry that remains is deliberate. An AI's answer is decided by
+will_heed_warning(); the player's is a choice, so there is nothing to predict
+and the model is only asked to make the demand. What binds afterwards is the
+same field in both directions, so the machinery below this is shared.
+*/
+static void demand_prompt(int speaker, int listener, char* out, size_t out_len) {
+    const Personality* p = find_personality(speaker);
+    int stand = standing_with(speaker, listener);
+    const char* bond =
+        stand == CH_STAND_PACT   ? "You are bound to them by a PACT, which makes "
+                                   "this a betrayal and not merely a theft." :
+        stand == CH_STAND_TREATY ? "You hold a TREATY of friendship with them, "
+                                   "which they have abused." :
+                                   "Nothing binds the two of you, so you have no "
+                                   "agreement for them to have broken -- only your "
+                                   "own strength to answer with.";
+    /*
+    Same rule as protest_prompt: never name a bond in the branch where there is
+    none, or the word alone conjures the thing it is denying.
+    */
+    const char* leverage =
+        stand == CH_STAND_NONE
+            ? "Do not speak of treaties or pacts. There are none."
+            : "You may hold what stands between you over them.";
+
+    char dossier[1024];
+    build_dossier(speaker, listener, dossier, sizeof(dossier));
+
+    char listener_who[192];
+    const MFaction& lm = MFactions[listener];
+    if (lm.title_leader[0] && lm.name_leader[0]) {
+        snprintf(listener_who, sizeof(listener_who), "%s %s of %s",
+            lm.title_leader, lm.name_leader, lm.formal_name_faction);
+    } else {
+        snprintf(listener_who, sizeof(listener_who), "%s", lm.formal_name_faction);
+    }
+
+    snprintf(out, out_len,
+"You are %s %s of %s on Planet.\n"
+"BACKGROUND: %s\n"
+"IDEOLOGY: %s\n"
+"YOU ARE: %s\n"
+"Your voice: \"%s\"\n"
+"\n"
+"WHAT HAS PASSED BETWEEN YOU:\n%s"
+"\n"
+"THE SITUATION:\n"
+"- %s has been running probe teams against you.\n"
+"- Your own operatives have caught them at it. There is no doubt.\n"
+"- %s\n"
+"- You are about to demand that they call their probe teams off.\n"
+"\n"
+"Speak to them. Conversation %d.\n"
+"\n"
+"RULES:\n"
+"- Two or three sentences. Speak directly to them.\n"
+"- Make the demand plainly. Do not ask a question you would accept 'no' to.\n"
+"- %s\n"
+"- Do not say what you will do if they refuse. You have not decided.\n"
+"- No quotation marks, no preamble, no notes.\n"
+"\n"
+"Say it once, and do not restate it in other words.\n"
+"\n"
+"YOUR DEMAND:\n",
+        p->title, p->leader, p->faction,
+        p->background, p->ideology, p->adjectives, p->blurb,
+        dossier,
+        listener_who,
+        bond,
+        variation_counter(),
+        leverage);
+}
+
+/*
+They demand you stop. Returns true if the player agreed.
+
+The player's word binds exactly as an AI's does -- chiron_warned_turn is written
+the same way and read by the same gate in veh_action.cpp -- because a promise
+only the AI can be held to is not a mechanic, it is a courtesy.
+*/
+static bool run_demand(int speaker, int listener) {
+    const Personality* p = find_personality(speaker);
+
+    char demand[1024];
+    demand[0] = '\0';
+    if (p) {
+        static char prompt[4096];
+        demand_prompt(speaker, listener, prompt, sizeof(prompt));
+        static char reply[4096];
+        if (http_generate(prompt, reply, sizeof(reply), chiron_conf.max_tokens)) {
+            strip_preamble(reply);
+            tidy_reply(reply);
+            strcpy_n(demand, sizeof(demand), reply);
+        }
+    }
+    if (!demand[0]) {
+        strcpy_n(demand, sizeof(demand),
+            "\"Your probe teams have been caught in our territory. Withdraw "
+            "them, or we will treat the next one as an act of war.\"");
+    }
+
+    /*
+    One popup, not two: their words are the body and the answer is the option
+    list, so the demand and the reply to it are the same moment. The affirmative
+    is SECOND because X_pop_2 returns the option index and the block reads true
+    only on 1.
+    */
+    syn_parse_state_t saved;
+    parse_state_save(&saved);
+    parse_says(0, MFactions[speaker].formal_name_faction, -1, -1);
+    parse_says(1, demand, -1, -1);
+    bool agree = X_pop_2("modmenu", "CHIRONDEMAND", 0);
+    parse_state_restore(&saved);
+
+    MFactions[listener].chiron_warned_turn[speaker] =
+        (int16_t)(agree ? *CurrentTurn : -*CurrentTurn);
+    ch_log("[demand] %s demanded we stop; we %s (standing=%d)\n",
+        MFactions[speaker].filename, agree ? "agreed" : "refused",
+        standing_with(speaker, listener));
+
+    /*
+    Both answers cost something, and both have to be said out loud for the same
+    reason the refusal notice exists on the other side: an option whose
+    consequence is invisible is an option that reads as decoration.
+    */
+    char notice[320];
+    if (agree) {
+        snprintf(notice, sizeof(notice),
+            "We have given our word. Our probe teams will not operate against "
+            "the %s for %d turns. Breaking it will be remembered.",
+            MFactions[speaker].adj_name_faction, CH_WARN_DURATION);
+    } else {
+        snprintf(notice, sizeof(notice),
+            "We have refused them. For the next %d turns they may break off "
+            "relations with us without dishonour.", CH_WARN_DURATION);
+    }
+    chiron_notice("Foreign Affairs", notice);
+    return agree;
+}
+
+/*
+The player is about to break a promise they gave. Returns true if they meant to.
+
+Called from the probe gate. Breaking your word has to be possible or the promise
+is a lock rather than a decision, and it has to be recorded or it is free. The
+engine already keeps the pair of counters for exactly this -- diplo_wrongs on
+the one who broke faith, diplo_betrayed on the one who was owed -- and
+build_dossier reads both, so the leader raises it themselves next time you
+speak. No new bookkeeping, and no new rule.
+*/
+bool chiron_confirm_break_word(int breaker, int tgt) {
+    chiron_ensure_init();
+
+    syn_parse_state_t saved;
+    parse_state_save(&saved);
+    char body[320];
+    snprintf(body, sizeof(body),
+        "We gave the %s our word that our probe teams would stand down, "
+        "and that word still holds. Proceeding will be taken as a betrayal.",
+        MFactions[tgt].adj_name_faction);
+    parse_says(0, "Operations Director", -1, -1);
+    parse_says(1, body, -1, -1);
+    bool proceed = X_pop_2("modmenu", "CHIRONBREAKWORD", 0);
+    parse_state_restore(&saved);
+
+    if (!proceed) {
+        return false;
+    }
+    MFactions[breaker].chiron_warned_turn[tgt] = 0;
+    Factions[breaker].diplo_wrongs[tgt]++;
+    Factions[tgt].diplo_betrayed[breaker]++;
+    ch_log("[demand] we broke our word to %s\n", MFactions[tgt].filename);
+    return true;
+}
+
+/*
+Offer to raise their probe teams with them, at a moment of the player's choosing.
+
+The turn-start popup is the only other way in, and it is a one-shot: say nothing
+and the grievance is gone until they rob you again. That is the wrong shape for
+the one feature here that is supposed to be a conversation, so the same
+confrontation is offered at the top of diplomacy whenever there is something
+unresolved to raise.
+
+Self-limiting by construction -- raising it writes chiron_warned_turn either way,
+and the guard below reads it -- so it cannot become a prompt on every visit.
+Declining is remembered only for the turn, because declining to bring it up now
+is not the same as deciding to let it go.
+*/
+static int raise_offered_turn[MaxPlayerNum];
+
+bool chiron_probe_grievance(int player_id, int ai_id) {
+    chiron_ensure_init();
+    if (!chiron_conf.enabled || !chiron_conf.probe_protests) {
+        return false;
+    }
+    if (player_id < 1 || player_id >= MaxPlayerNum
+        || ai_id < 1 || ai_id >= MaxPlayerNum || player_id == ai_id) {
+        return false;
+    }
+    if (Factions[player_id].diplo_stolen_techs[ai_id]
+        + Factions[player_id].diplo_mind_control[ai_id] <= 0) {
+        return false;   // they have never robbed us
+    }
+    if (Factions[player_id].diplo_status[ai_id] & DIPLO_VENDETTA) {
+        return false;   // nothing left to threaten
+    }
+    // Already settled one way or the other, and not yet lapsed.
+    return !chiron_probe_warned(ai_id, player_id)
+        && !chiron_probe_refused(ai_id, player_id);
+}
+
+void chiron_offer_raise(int player_id, int ai_id) {
+    if (!chiron_probe_grievance(player_id, ai_id)) {
+        return;
+    }
+    if (raise_offered_turn[ai_id] == *CurrentTurn + 1) {
+        return;   // asked already this turn; +1 so turn 0 is not "asked"
+    }
+    raise_offered_turn[ai_id] = *CurrentTurn + 1;
+
+    syn_parse_state_t saved;
+    parse_state_save(&saved);
+    parse_says(0, MFactions[ai_id].formal_name_faction, -1, -1);
+    parse_says(1, "Their probe teams have operated against us and the matter "
+                  "is still open. Raise it with them now?", -1, -1);
+    bool raise = X_pop_2("modmenu", "CHIRONRAISE", 0);
+    parse_state_restore(&saved);
+
+    if (raise) {
+        run_protest(ai_id, player_id);
+    }
+}
+
+/*
+Watch for probe operations either way and open the conversation about them.
 
 Diffed rather than hooked, for the same reason Planetnet is: the counters are
 already maintained by the engine and cost nothing to read, where probe()'s
 dispatch is 600 lines with a dozen action paths.
+
+Both directions are watched from here. Factions[victim].diplo_stolen_techs[thief]
+is the shape of the field (probe.cpp:1233 does tgt->diplo_stolen_techs[veh_fc_id]++),
+so the player's row counts what was done TO them and every other faction's row,
+read at the player's column, counts what the player did to it.
+
+THE BASELINE IS PER GAME, NOT PER FACTION. It used to be `!prev`, per pair, which
+is not a baseline at all: a faction going 0 -> 1 has prev == 0, so the very first
+theft each faction ever committed was swallowed and only quietly raised the
+baseline to 1. The feature therefore never fired until a faction robbed you
+TWICE, which from the seat is indistinguishable from it never firing. What the
+guard was actually for -- counters loaded out of a save reading as a screenful of
+fresh outrages -- needs one flag for the whole game, taken once.
 */
-static int theft_seen[MaxPlayerNum];
+static int  theft_seen[MaxPlayerNum];     // thefts against the player, by faction
+static int  theft_done[MaxPlayerNum];     // thefts by the player, against faction
+static int  theft_seen_turn = -1;
+static bool theft_baselined = false;
+
+static void theft_totals(int faction_id, int i, int* against_us, int* by_us) {
+    *against_us = Factions[faction_id].diplo_stolen_techs[i]
+                + Factions[faction_id].diplo_mind_control[i];
+    *by_us      = Factions[i].diplo_stolen_techs[faction_id]
+                + Factions[i].diplo_mind_control[faction_id];
+}
 
 void chiron_check_thefts(int faction_id) {
     chiron_ensure_init();
     if (!chiron_conf.enabled || !chiron_conf.probe_protests) {
         return;
     }
-    // Only the player gets asked; the AI factions settle this among themselves.
+    // Only the player is party to this; the AI factions settle it among themselves.
     if (faction_id < 1 || faction_id != (MapWin ? MapWin->cOwner : 0)) {
         return;
     }
+    /*
+    A turn going backwards is a different game -- a new one started without
+    quitting, or a save loaded from earlier in this one. Either way the totals we
+    remember belong to a game that is no longer being played, so re-baseline
+    rather than report the difference between two histories.
+    */
+    if (*CurrentTurn < theft_seen_turn) {
+        theft_baselined = false;
+    }
+    theft_seen_turn = *CurrentTurn;
+
+    if (!theft_baselined) {
+        for (int i = 1; i < MaxPlayerNum; i++) {
+            theft_totals(faction_id, i, &theft_seen[i], &theft_done[i]);
+        }
+        theft_baselined = true;
+        ch_log("[protest] baseline taken at turn %d\n", *CurrentTurn);
+        return;
+    }
+
     for (int i = 1; i < MaxPlayerNum; i++) {
         if (i == faction_id) {
             continue;
         }
-        int total = Factions[faction_id].diplo_stolen_techs[i]
-                  + Factions[faction_id].diplo_mind_control[i];
+        int total, mine;
+        theft_totals(faction_id, i, &total, &mine);
         int prev = theft_seen[i];
+        int prev_mine = theft_done[i];
         theft_seen[i] = total;
-        if (total <= prev || !prev) {
-            /*
-            A zero baseline is the first turn we looked, not a new theft --
-            counters carried in from a save would otherwise all read as fresh
-            outrages the moment the game loads.
-            */
-            continue;
-        }
+        theft_done[i] = mine;
+
         if (Factions[faction_id].diplo_status[i] & DIPLO_VENDETTA) {
             continue;   // already at war; there is nothing left to threaten
+        }
+        /*
+        They caught us. Checked first because if both happened in the same turn
+        the demand made of the player is the one they cannot postpone -- our own
+        grievance keeps, and chiron_offer_raise() will bring it up in diplomacy.
+        */
+        if (mine > prev_mine && !chiron_probe_warned(faction_id, i)
+            && !chiron_probe_refused(faction_id, i) && find_personality(i)) {
+            run_demand(i, faction_id);
+        }
+        if (total <= prev) {
+            continue;
         }
         if (chiron_probe_warned(i, faction_id)) {
             continue;   // they are already under a warning they accepted

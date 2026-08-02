@@ -121,14 +121,40 @@ True if faction_id refused a warning from tgt_faction recently enough for it
 still to be grounds for war. Read by double_cross() in faction.cpp, where it
 feeds the engine's own is_victim flag so that breaking with them costs no
 integrity -- the same treatment the game already gives an atrocity victim.
+
+Note the direction, which an earlier comment here had backwards: the refusal is
+stored on the faction that REFUSED, indexed by whoever warned them. So this asks
+"did faction_id refuse tgt_faction", and the call site passes the defender first
+because it is the defender's refusal that excuses the attacker.
 */
 bool chiron_probe_refused(int faction_id, int tgt_faction);
 
 /*
-Per-turn check for probe operations against the player, offering the
+Per-turn check for probe operations in either direction, opening the
 confrontation when one is found. Called from faction_upkeep.
 */
 void chiron_check_thefts(int faction_id);
+
+/*
+The player is under a warning they gave and is about to probe anyway. Asks
+whether they mean it; on yes the promise is discharged and the engine's own
+double-cross counters record it. Read by the probe gate in veh_action.cpp.
+*/
+bool chiron_confirm_break_word(int breaker, int tgt);
+
+/*
+Is there an unresolved probe grievance the player could raise with this faction?
+True while they have robbed us and the matter has been neither conceded nor
+refused within the warning window.
+*/
+bool chiron_probe_grievance(int player_id, int ai_id);
+
+/*
+Offer to raise it at the top of a diplomacy conversation, so the confrontation
+is something the player can start rather than only something they are handed at
+turn start. Called from mod_diplomacy_menu.
+*/
+void chiron_offer_raise(int player_id, int ai_id);
 
 // The file chiron_rewrite_block() writes the replacement block into.
 #define CH_GEN_FILE "chiron_gen.txt"

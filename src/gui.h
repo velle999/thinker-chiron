@@ -86,6 +86,7 @@ void __thiscall ReportWin_close_handler(SubInterface* This);
 void __thiscall Console_editor_fungus(Console* UNUSED(This));
 void __cdecl say_loc(char* dest, int x, int y, int a4, int a5, int a6);
 void __cdecl mod_diplomacy_caption(int faction1, int faction2);
+int __cdecl mod_diplomacy_menu(int faction1, int faction2);
 void __cdecl reset_netmsg_status();
 int __thiscall mod_NetMsg_pop(NetMessage* This, const char* label, int delay, int a4, const char* filename);
 int __thiscall mod_BasePop_start(
