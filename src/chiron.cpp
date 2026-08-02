@@ -3498,14 +3498,14 @@ void chiron_check_thefts(int faction_id) {
         parse_state_save(&saved);
         parse_says(0, MFactions[i].formal_name_faction, -1, -1);
         int stand = standing_with(i, faction_id);
-        parse_says(1, stand == CH_STAND_PACT
+        fill_body_slots(stand == CH_STAND_PACT
             ? "Their probe teams have been caught operating against us, in "
               "defiance of our pact. Demand that they stop?"
             : stand == CH_STAND_TREATY
             ? "Their probe teams have been caught operating against us, in "
               "defiance of our treaty. Demand that they stop?"
             : "Their probe teams have been caught operating against us. "
-              "Demand that they stop?", -1, -1);
+              "Demand that they stop?", CH_SPEAK_LINES);
         /*
         X_pop_2, because bare X_pop looks in the WRONG FILE.
 

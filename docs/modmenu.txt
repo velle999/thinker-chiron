@@ -136,9 +136,16 @@ Value:
 $MSG1
 
 #CHIRONPROBE
-#xs 440
+#xs 450
 #caption $MSG0
 $MSG1
+$MSG2
+$MSG3
+$MSG4
+$MSG5
+$MSG6
+$MSG7
+$MSG8
 
 Say nothing.
 Demand that they call off their probe teams.
