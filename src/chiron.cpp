@@ -480,6 +480,16 @@ static const Personality* find_personality(int faction_id) {
 static int caption_a = -1;
 static int caption_b = -1;
 
+/*
+The last line a leader was given to say, kept as the opening of a reply, with
+whose mouth it came out of. Both, because the rewrite hook fires for every
+faction and the diplomacy option must not offer to answer another leader's
+words -- in practice #DIPLO is rewritten every time the screen opens, so this
+is normally the line still on screen, but "normally" is not a guarantee.
+*/
+static char chiron_last_said[1024];
+static int chiron_last_speaker = -1;
+
 void chiron_set_speakers(int faction1, int faction2) {
     chiron_ensure_init();
     /*
@@ -2081,6 +2091,14 @@ FILE* chiron_rewrite_block(FILE* src, const char* label) {
     fprintf(out, "\n#CHIRONEND\n");
     fclose(out);
 
+    /*
+    Keep the last thing this leader said, so the free-text option in the
+    diplomacy menu has something to be a reply TO. Unwrapped: the popup wraps
+    again for itself, and the prompt wants a paragraph, not a column.
+    */
+    strcpy_n(chiron_last_said, sizeof(chiron_last_said), generated);
+    chiron_last_speaker = speaker_faction;
+
     // Reopen and seek past our own header so text_get() continues naturally.
     FILE* gen = env_open(CH_GEN_FILE, "rt");
     if (!gen) {
@@ -2838,6 +2856,106 @@ void chiron_converse(int speaker, int listener, const char* opening) {
         ch_log("[converse] %s exchange %d\n", MFactions[speaker].filename, turn + 1);
     }
     speak_and_offer(caption, line, false);
+}
+
+// ── the diplomacy menu's own option ────────────────────────────────────────
+
+/*
+Put "Say something to them" at the bottom of the STANDARD diplomacy list.
+
+velle: "i thought it would be in the standard dialog box as an extra option at
+the end" -- which is right, and is where the offhand remarks actually are. The
+conversation was reachable only from Chiron's own popups, so in ordinary
+diplomacy, where a leader talks to you every single turn, there was still no way
+to answer.
+
+An earlier note in this file said the menu could not be extended because
+diplomacy_menu returns 0..7 into a jump table at 0x5589BC. That is true of the
+RETURN VALUE and false of the list. Reading 0x54C560 properly, the menu is built
+one line at a time:
+
+    text_get()                       ; next #DIPLOMENU line
+    parse_string(Text, 0x9B86A0)     ; substitute into a scratch buffer
+    <a condition deciding if it applies>
+    Dialogs_item(list, 0x9B86A0, N)  ; N is a HARDCODED id, not a position
+    ...
+    text_close()                     ; 0x54C910, after every item
+    BasePop_exec_3(dialog, ...)      ; 0x54C922, returns the chosen id
+
+so the ids are sparse and stable (a skipped option leaves a gap), the list is an
+ordinary object, and nothing stops another item going on the end. Three call
+sites carry the whole feature:
+
+  0x54C6DB  the FIRST Dialogs_item, which is the one with no condition on it,
+            so it is where the list object can be captured unconditionally.
+  0x54C910  text_close, unconditional and after every item: append ours here.
+  0x54C922  the exec: if our id comes back, hold the dialog, run the
+            conversation, and show the SAME list again. The engine only ever
+            sees an id it wrote itself, so the jump table is never involved and
+            the sparse-id switch below is untouched.
+
+Re-showing rather than returning is also the right shape for the seat: you say
+something, they answer, and you are back at the menu with every normal option
+still there.
+*/
+#define CH_DIPLO_SAY_ID 9   // one past #DIPLOMENU's nine lines; ids are 0..8
+
+static Dialogs* diplo_list = NULL;
+static int diplo_speaker = -1;
+static int diplo_listener = -1;
+
+void chiron_set_diplo_pair(int speaker, int listener) {
+    diplo_speaker = speaker;
+    diplo_listener = listener;
+}
+
+/*
+True when the option should be on the list at all.
+
+Not offered without a bible or a backend, because an option that opens a box and
+then has nothing to say is worse than one that was never there.
+*/
+static bool diplo_can_say() {
+    return chiron_conf.enabled
+        && diplo_speaker >= 1 && diplo_listener >= 1
+        && find_personality(diplo_speaker) != NULL
+        && chiron_last_said[0] != '\0'
+        && chiron_last_speaker == diplo_speaker;
+}
+
+int __thiscall chiron_diplo_first_item(Dialogs* This, const char* text, int id) {
+    diplo_list = This;
+    return Dialogs_item(This, text, id);
+}
+
+void __cdecl chiron_diplo_close() {
+    chiron_ensure_init();
+    if (diplo_list && diplo_can_say()) {
+        Dialogs_item(diplo_list, "\"A word with you, before we finish . . .\"",
+            CH_DIPLO_SAY_ID);
+    }
+    text_close();
+}
+
+int __thiscall chiron_diplo_exec(BasePop* This, int a2, int a3) {
+    for (int guard = 0; guard < 32; guard++) {
+        int choice = BasePop_exec_3(This, a2, a3);
+        if (choice != CH_DIPLO_SAY_ID) {
+            diplo_list = NULL;
+            return choice;
+        }
+        /*
+        The engine's substitution slots belong to the dialog we are standing
+        inside; chiron_converse opens popups of its own that overwrite them.
+        Same hazard as the news dispatch, and the same fix.
+        */
+        syn_parse_state_t saved;
+        parse_state_save(&saved);
+        chiron_converse(diplo_speaker, diplo_listener, chiron_last_said);
+        parse_state_restore(&saved);
+    }
+    diplo_list = NULL;
+    return 0;
 }
 
 // ── probe protests ─────────────────────────────────────────────────────────

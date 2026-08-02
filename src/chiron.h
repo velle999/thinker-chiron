@@ -143,6 +143,15 @@ double-cross counters record it. Read by the probe gate in veh_action.cpp.
 bool chiron_confirm_break_word(int breaker, int tgt);
 
 /*
+The three hooks that put "a word with you" on the standard diplomacy list.
+Patched at 0x54C6DB, 0x54C910 and 0x54C922 -- see chiron.cpp for why those.
+*/
+void chiron_set_diplo_pair(int speaker, int listener);
+int __thiscall chiron_diplo_first_item(Dialogs* This, const char* text, int id);
+void __cdecl chiron_diplo_close();
+int __thiscall chiron_diplo_exec(BasePop* This, int a2, int a3);
+
+/*
 Let the player answer a leader in their own words, and the leader answer that.
 
 `opening` is what the leader has just said. Runs until the player stops

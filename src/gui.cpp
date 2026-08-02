@@ -1508,9 +1508,13 @@ Which of them is the human is not assumed, because diplomacy runs both ways.
 int __cdecl mod_diplomacy_menu(int faction1, int faction2)
 {
     if (is_human(faction2) && !is_human(faction1)) {
+        chiron_set_diplo_pair(faction1, faction2);
         chiron_offer_raise(faction2, faction1);
     } else if (is_human(faction1) && !is_human(faction2)) {
+        chiron_set_diplo_pair(faction2, faction1);
         chiron_offer_raise(faction1, faction2);
+    } else {
+        chiron_set_diplo_pair(-1, -1);   // AI to AI; no one is watching
     }
     return diplomacy_menu(faction1, faction2);
 }

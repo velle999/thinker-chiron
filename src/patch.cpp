@@ -1,5 +1,6 @@
 
 #include "patch.h"
+#include "chiron.h"
 #include "patchdata.h"
 #include "patchveh.h"
 
@@ -784,6 +785,16 @@ bool patch_setup(Config* cf) {
     write_call(0x54814D, (int)mod_diplomacy_caption);
     // Chiron Rising: the only call site of diplomacy_menu in the binary.
     write_call(0x558574, (int)mod_diplomacy_menu);
+    /*
+    Chiron Rising: "a word with you" on the end of the standard diplomacy list.
+    The first Dialogs_item is the one with no condition on it, so it is where
+    the list can be captured; text_close runs after every item, so that is where
+    ours is appended; the exec is wrapped so our id is consumed and the same
+    list is shown again rather than reaching the engine's sparse-id switch.
+    */
+    write_call(0x54C6DB, (int)chiron_diplo_first_item);
+    write_call(0x54C910, (int)chiron_diplo_close);
+    write_call(0x54C922, (int)chiron_diplo_exec);
     write_call(0x54F7D7, (int)mod_energy_trade);
     write_call(0x54F77E, (int)mod_base_swap);
     write_call(0x542278, (int)mod_buy_tech);
