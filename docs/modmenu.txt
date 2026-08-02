@@ -182,6 +182,22 @@ $MSG8
 
 Refuse. Our probe teams answer to us alone.
 Give our word. Call them off.
+Answer them in our own words first.
+
+#CHIRONDEMAND2
+#xs 450
+#caption $MSG0
+$MSG1
+$MSG2
+$MSG3
+$MSG4
+$MSG5
+$MSG6
+$MSG7
+$MSG8
+
+Refuse. Our probe teams answer to us alone.
+Give our word. Call them off.
 
 #CHIRONBREAKWORD
 #xs 450

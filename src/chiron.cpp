@@ -3222,13 +3222,31 @@ static bool run_demand(int speaker, int listener) {
     only on 1. Wrapped across the block's body lines rather than handed over as
     one string, because a generated paragraph is both wider than anything the
     engine renders and longer than a 256-byte parse slot.
+
+    Third option: answer them in your own words first. The protest already ends
+    in a conversation and this did not, which left the one moment a leader
+    addresses the player DIRECTLY as the one moment they could not reply -- two
+    buttons written by someone else, which is the thing that reading a fresh
+    line is supposed to stop feeling like. Talking settles nothing on its own,
+    so afterwards the same choice is put again through a two-option block;
+    offered once, because a demand you can defer indefinitely is not a demand.
     */
     syn_parse_state_t saved;
     parse_state_save(&saved);
     parse_says(0, MFactions[speaker].formal_name_faction, -1, -1);
     fill_body_slots(demand, CH_SPEAK_LINES);
-    bool agree = X_pop_2("modmenu", "CHIRONDEMAND", 0);
+    int choice = X_pop_2("modmenu", "CHIRONDEMAND", 0);
     parse_state_restore(&saved);
+
+    if (choice == 2) {
+        chiron_converse(speaker, listener, demand);
+        parse_state_save(&saved);
+        parse_says(0, MFactions[speaker].formal_name_faction, -1, -1);
+        fill_body_slots("They are waiting on your answer.", CH_SPEAK_LINES);
+        choice = X_pop_2("modmenu", "CHIRONDEMAND2", 0);
+        parse_state_restore(&saved);
+    }
+    bool agree = (choice == 1);
 
     MFactions[listener].chiron_warned_turn[speaker] =
         (int16_t)(agree ? *CurrentTurn : -*CurrentTurn);
