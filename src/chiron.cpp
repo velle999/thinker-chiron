@@ -958,6 +958,20 @@ static const char* MetaMarkers[] = {
     so it needs cutting wherever it appears.
     */
     "message in your voice", "your answer:", "dispatch:", "names:",
+    /*
+    A dateline, and everything after it.
+
+    A Planetnet bulletin finished cleanly and then wrote "Cassandra Directorate
+    Planetnet Bureau Planetnet, Planet" and started the same news over in prose
+    twice as florid, which is what ate the token budget and left the box ending
+    mid-word on "and". cut_at_scaffolding cannot see it: a dateline is not a
+    bullet, not a numbered step and not an ALL-CAPS label, and this one arrived
+    mid-line rather than at the start of one.
+
+    Cutting at the dateline is what makes the second copy disappear, since the
+    model always signs off before it starts again -- the sign-off IS the seam.
+    */
+    "planetnet bureau", "news bureau", "planetnet, planet",
 };
 
 // strstr, case-insensitively, without depending on a non-standard _stristr.
@@ -2780,6 +2794,147 @@ static void news_notice(const char* text) {
     chiron_notice("Planetnet", text);
 }
 
+/*
+Every number in a dispatch has to be a number we handed over.
+
+The deltas rewrite above stopped the model inventing EVENTS. It did not stop it
+inventing FIGURES, and a figure is the more dangerous of the two because it
+looks like the kind of thing a wire service would know. A bulletin whose only
+facts were base counts came back with "a 24-hour population of 76,879, with 51%
+under agri, 32% industrial, and 17% urban" -- no population is ever passed to
+the model, and the rule forbidding percentages was already in the prompt, last,
+on its own line. It read the rule and wrote the percentages anyway.
+
+So it is checked rather than asked for. Digits are compared as whole tokens, not
+as substrings: "1" must not be satisfied by the "19" in the standings. Commas
+inside a number are dropped on both sides so 76,879 and 76879 are one token.
+
+A percent sign is refused outright. Nothing we pass is a share of anything, so
+there is no percentage a truthful dispatch could contain.
+*/
+static bool number_in(const char* facts, const char* num, size_t num_len) {
+    for (const char* p = facts; *p; ) {
+        if (!isdigit((unsigned char)*p)) {
+            p++;
+            continue;
+        }
+        // Walk one whole number, skipping the commas inside it.
+        size_t i = 0;
+        bool same = true;
+        const char* q = p;
+        while (*q && (isdigit((unsigned char)*q) || (*q == ',' && isdigit((unsigned char)q[1])))) {
+            if (*q != ',') {
+                if (i >= num_len || *q != num[i]) {
+                    same = false;
+                }
+                i++;
+            }
+            q++;
+        }
+        if (same && i == num_len) {
+            return true;
+        }
+        p = q;
+    }
+    return false;
+}
+
+static bool news_numbers_ok(const char* facts, const char* reply) {
+    if (strchr(reply, '%')) {
+        ch_log("[news] rejected: percentage\n");
+        return false;
+    }
+    for (const char* p = reply; *p; ) {
+        if (!isdigit((unsigned char)*p)) {
+            p++;
+            continue;
+        }
+        char num[32];
+        size_t n = 0;
+        const char* q = p;
+        while (*q && (isdigit((unsigned char)*q) || (*q == ',' && isdigit((unsigned char)q[1])))) {
+            if (*q != ',' && n + 1 < sizeof(num)) {
+                num[n++] = *q;
+            }
+            q++;
+        }
+        num[n] = '\0';
+        if (n && !number_in(facts, num, n)) {
+            ch_log("[news] rejected: %s is not one of ours\n", num);
+            return false;
+        }
+        p = q;
+    }
+    return true;
+}
+
+/*
+End on a full stop, wherever the last one is.
+
+Two different cuts leave a dangling fragment behind, and the fix is the same for
+both. The token ceiling ends the reply mid-word -- the bulletin in the
+screenshot stopped on "providing sustenance and". And cutting a dateline out of
+the middle leaves whatever led into it: "... holding steady. Cassandra
+Directorate" is what survives once "Planetnet Bureau" and the second copy after
+it are gone, because the faction name sits in front of the marker rather than
+behind it.
+
+tidy_reply does this already, as step 2 of three, but the other two steps are
+diplomacy's: it caps at CH_MAX_SENTENCES and wraps the result in the pair of
+quotes every shipped speech block has. A wire dispatch is neither spoken nor
+four sentences by rule, so it gets the one step it needs rather than the whole
+function.
+
+A reply with no terminator at all is left alone, on tidy_reply's reasoning: text
+with no full stop still beats an empty box.
+*/
+static void news_end_at_sentence(char* text) {
+    size_t last = 0;
+    for (size_t i = 0; text[i]; i++) {
+        if ((text[i] == '.' || text[i] == '!' || text[i] == '?')
+            && (text[i+1] == '\0' || text[i+1] == ' ' || text[i+1] == '\n'
+                || text[i+1] == '\r' || text[i+1] == '\t')) {
+            last = i + 1;
+        }
+    }
+    if (last) {
+        text[last] = '\0';
+    }
+}
+
+/*
+What to show when the model cannot be trusted with the facts.
+
+There is no vanilla dispatch to fall back to -- this feature has no shipped
+equivalent -- so the fallback is the facts themselves, flattened out of the
+bullet list they arrive in. It reads plainly rather than well, which is the
+correct trade: a dry true bulletin beats a fluent invented one, and the box is
+never empty.
+*/
+static void news_plain(const char* facts, char* out, size_t out_len) {
+    size_t j = 0;
+    bool gap = true;   // Swallows leading space, and collapses runs of it.
+    for (const char* p = facts; *p && j + 1 < out_len; p++) {
+        char c = *p;
+        if (c == '\n' || c == '\t' || c == ' ') {
+            gap = true;
+            continue;
+        }
+        // The "- " that opens each delta line has no meaning once flattened.
+        if (c == '-' && gap && (p[1] == ' ' || p[1] == '\0')) {
+            continue;
+        }
+        if (gap && j) {
+            out[j++] = ' ';
+        }
+        gap = false;
+        if (j + 1 < out_len) {
+            out[j++] = c;
+        }
+    }
+    out[j] = '\0';
+}
+
 void chiron_show_news() {
     chiron_ensure_init();
 
@@ -2832,8 +2987,17 @@ void chiron_show_news() {
 
     static char prompt[4096];
     snprintf(prompt, sizeof(prompt),
-"You write for Planetnet, the wire service read across Planet.\n"
-"Your readers are the colonists of %s.\n"
+/*
+Name the two things separately and say which is which.
+
+"You write for Planetnet, the wire service read across Planet" put two proper
+nouns one clause apart that differ by three letters, and the model collapsed
+them: "Nineteen bases now stand on Planetnet". The world has to be named on its
+own line as the world before the service is named at all.
+*/
+"The world is called Planet. Planetnet is a wire service that reports on it; "
+"Planetnet is not a place and nothing stands on it.\n"
+"You write for Planetnet. Your readers are the colonists of %s.\n"
 "\n"
 "WHAT CHANGED:\n%s"
 "\n"
@@ -2846,14 +3010,24 @@ void chiron_show_news() {
 "- Dry and clipped, the way a wire service writes on a frontier world.\n"
 "- Start with the news itself: no headline, no byline, no date, no faction name "
 "and colon at the front.\n"
+"- Write the dispatch once. No byline, no bureau line and no sign-off after it, "
+"and never a second version of the same news.\n"
 "\n"
 /*
 The anti-invention rule goes last, on its own, for the same reason the
 placeholder reminder does: the close of the prompt is what carries.
+
+Naming the invented categories is worth the words. "Do not turn them into a
+percentage" was already here and was ignored; what came back was a population
+and a three-way split of it, neither of which is a number this prompt has ever
+contained. It is enforced in news_numbers_ok either way -- this only saves the
+round trip.
 */
 "Report only what is listed above. Invent no battle, no famine, no treaty and "
-"no faction beyond it. Use only the numbers given: do not add, total, compare "
-"or turn any of them into a percentage or a share.\n"
+"no faction beyond it. Every number you write must be one of the numbers above: "
+"you do not know the population, you do not know how anyone makes a living, and "
+"you cannot add, total, compare or turn any figure into a percentage or a "
+"share.\n"
 "\n"
 "DISPATCH:\n",
         our_name, facts, variation_counter(), CH_WRAP_COLS);
@@ -2861,18 +3035,37 @@ placeholder reminder does: the close of the prompt is what carries.
     static char reply[4096];
     chiron_trace("news: prompt built (%d bytes)\n", (int)strlen(prompt));
     /*
-    120 tokens is four sentences with no room left over. At 220 the model filled
-    the slack rather than stopping, and what it filled it with was invented.
+    Two attempts, then the plain facts.
+
+    A rejected dispatch is worth one retry because the failure is a sampling
+    accident rather than a standing refusal -- the same prompt usually comes
+    back clean. It is not worth two: the game blocks for the whole generation,
+    and a third round trip turns a pause the player chose into one they notice.
     */
-    bool ok = http_generate(prompt, reply, sizeof(reply), 120);
-    if (!ok) {
-        ch_log("[news] generation failed\n");
-        news_notice("The relay is silent. No dispatch this turn.");
-        return;
+    bool have = false;
+    for (int attempt = 0; attempt < 2 && !have; attempt++) {
+        /*
+        120 tokens is four sentences with no room left over. At 220 the model
+        filled the slack rather than stopping, and what it filled it with was
+        invented.
+        */
+        if (!http_generate(prompt, reply, sizeof(reply), 120)) {
+            ch_log("[news] generation failed\n");
+            news_notice("The relay is silent. No dispatch this turn.");
+            return;
+        }
+        strip_preamble(reply);
+        cut_at_meta(reply);
+        cut_at_scaffolding(reply);
+        // Before the number check, not after: cutting a dateline can take the
+        // invented figures with it, and then there is no retry to spend.
+        news_end_at_sentence(reply);
+        have = news_numbers_ok(facts, reply);
     }
-    strip_preamble(reply);
-    cut_at_meta(reply);
-    cut_at_scaffolding(reply);
+    if (!have) {
+        ch_log("[news] falling back to the plain facts\n");
+        news_plain(facts, reply, sizeof(reply));
+    }
 
     /*
     Same width as the diplomacy wrapper, and for the same reason: the engine has
