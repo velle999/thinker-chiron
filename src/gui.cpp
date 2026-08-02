@@ -701,6 +701,12 @@ LRESULT WINAPI ModWinProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         // Planetnet dispatch. Map window only, so it cannot fire at the menus.
         chiron_show_news();
 
+    } else if (msg == WM_CHAR && wParam == 'm' && alt_key_down()
+    && !*GameHalted && current_window() == GW_World) {
+        // Chiron's own menu, beside Thinker's Alt+T. Map window only, same
+        // reason: the parse-slot save/restore below assumes a live game.
+        chiron_show_menu();
+
     } else if (!conf.reduced_mode && msg == WM_CHAR && wParam == 't' && alt_key_down()) {
         show_mod_menu();
 

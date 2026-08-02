@@ -96,6 +96,20 @@ install.sh ships.
 void chiron_show_news();
 
 /*
+The mod's own menu, bound to Alt+M in the map window.
+
+Answers the one question the design cannot otherwise answer from the seat: is
+this working? Every failure here falls back to the game's own text, so a dead
+backend and an uninstalled mod look identical on screen. The menu says which,
+carries a connection test, and lets the switches be thrown for the session
+without editing chiron.ini and restarting.
+
+Renders through #CHIRONMENU in modmenu.txt -- another reason that file must be
+the copy install.sh ships.
+*/
+void chiron_show_menu();
+
+/*
 True while faction_id has agreed to a warning from tgt_faction and the reprieve
 has not lapsed. Read by the probe gate in veh_action.cpp, which is what makes an
 agreement mean anything.

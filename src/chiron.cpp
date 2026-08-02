@@ -143,7 +143,42 @@ struct Personality {
     const char* preferred;
     const char* aversion;
     const char* blurb;
+    /*
+    A faction whose statements about itself are not to be trusted.
+
+    NULL for everyone else, and it must stay last in the struct so the entries
+    below keep initialising it to NULL without listing it.
+
+    This is the one thing in the mod that canned text could not do. A scripted
+    lie is read once and recognised forever: the second playthrough, you know
+    the line, so you know the bluff, and the faction is just a faction with a
+    tell. A generated lie is different every time and can only be caught by
+    weighing what they are saying against what you can see, which is what the
+    concept was always supposed to be about.
+
+    It is safe here for the same reason the rest of the mod is: CHIRON DECIDES
+    THE WORDS, NEVER THE OUTCOME. The engine makes the same demand, shows the
+    same buttons and settles the same way whatever the model writes -- so this
+    can only ever change what a leader CLAIMS, never what a treaty does. And the
+    mandatory-value check draws the second line: a reply that misstates the tech
+    or the number of credits on the table loses the values it had to keep and is
+    discarded for vanilla before it reaches the screen. So the deception is
+    structurally confined to the speaker's account of themselves, which is
+    precisely where the design wants it.
+    */
+    const char* deception;
 };
+
+/*
+Every entry but one stops before `deception`, which is exactly the intent: an
+omitted member of an aggregate is value-initialised, so they all get NULL and
+find_personality's callers see "this leader does not lie". C++11 has no default
+member initialiser that would survive here -- adding one makes Personality a
+non-aggregate and breaks every brace below -- so the warning is turned off for
+the table rather than answered with thirteen NULLs.
+*/
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 
 static const Personality Personalities[] = {
 {
@@ -400,7 +435,32 @@ so a leader's voice matches what the engine already says about them.
     "I have never once been wrong about this world, and never once been believed in "
     "time. I have stopped regarding those as separate problems."
 },
+{
+    "ASSURE", "Underwriter", "Yael Vashti", "Vashti's Assurance",
+    "The Unity's chief negotiator, who wrote the mission's supply contracts and "
+    "every indemnity clause in them. She has never been caught in a breach and has "
+    "never told an inspector a true thing about her own holdings.",
+    "Everyone on this world says what they are, and gives it away for nothing. A "
+    "position stated is a position surrendered. What binds people is not sincerity "
+    "but consideration -- the signed thing, the thing with a price on it. My word "
+    "is worth what you pay for it. My signature is worth everything, which is "
+    "precisely why I have never broken one.",
+    "Hold the balance of every negotiation on Planet by being the only party whose "
+    "position is never known.",
+    "warm, unhurried, disarming, entirely comfortable being doubted, never flustered",
+    "confusing candour with virtue and calling the confusion honesty",
+    "announce their weakness and then wonder how it was exploited",
+    "Free Market economics", "Fundamentalism, which mistakes conviction for a position",
+    "I have never once lied in a contract, and I have never once told the truth in a "
+    "conversation. Everyone I deal with learns the difference. Most of them learn it "
+    "late.",
+    // The lie is bounded: what they claim about themselves, in one direction.
+    "You overstate your strength and understate what you need. Imply reserves, "
+    "allies and options you may not have, and never admit pressure you are under."
+},
 };
+
+#pragma GCC diagnostic pop
 
 static const Personality* find_personality(int faction_id) {
     if (faction_id < 1 || faction_id >= MaxPlayerNum) {
@@ -1231,15 +1291,67 @@ static bool ensure_winsock() {
     return winsock_ready;
 }
 
+/*
+What the backend has been doing, so the menu can say.
+
+Every failure path in this file falls back to vanilla text, silently and by
+design -- a dialogue box must never come up empty because a daemon is down. The
+cost of that is a mod which looks identical whether it is working or not: a dead
+bridge shows the game's own lines, which is exactly what an uninstalled mod
+shows. Nothing on screen distinguishes them, so the first symptom is the player
+concluding the mod does nothing.
+
+Recording the last outcome here is what lets chiron_show_menu() answer the
+question directly. The reason string is set at each failure site rather than
+inferred from a code, because "the connection was refused" and "the model
+answered but said nothing" are the same false to a caller and completely
+different problems to whoever has to fix it.
+*/
+static struct {
+    bool  ever;             // has a generation been attempted at all
+    bool  last_ok;
+    DWORD last_ms;          // round trip of the last attempt
+    int   calls;
+    int   failures;
+    char  reason[96];       // why the last failure failed; empty on success
+} backend = {};
+
+static void backend_failed(const char* why) {
+    strcpy_n(backend.reason, sizeof(backend.reason), why);
+}
+
+static bool http_generate_raw(const char* prompt, char* out, size_t out_len,
+                              int max_tokens);
+
 // max_tokens is per call: a dialogue line and a list of base names want very
 // different budgets, and the budget is the whole cost of the blocking pause.
 static bool http_generate(const char* prompt, char* out, size_t out_len,
                           int max_tokens) {
+    DWORD t0 = GetTickCount();
+    backend.reason[0] = '\0';
+    bool ok = http_generate_raw(prompt, out, out_len, max_tokens);
+    backend.last_ms = GetTickCount() - t0;
+    backend.last_ok = ok;
+    backend.ever = true;
+    backend.calls++;
+    if (!ok) {
+        backend.failures++;
+        if (!backend.reason[0]) {
+            backend_failed("no usable reply");
+        }
+    }
+    return ok;
+}
+
+static bool http_generate_raw(const char* prompt, char* out, size_t out_len,
+                              int max_tokens) {
     if (!ensure_winsock()) {
+        backend_failed("winsock did not load");
         return false;
     }
     SOCKET sock = ws.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock == INVALID_SOCKET) {
+        backend_failed("no socket");
         return false;
     }
 
@@ -1276,6 +1388,7 @@ static bool http_generate(const char* prompt, char* out, size_t out_len,
                 chiron_conf.host, chiron_conf.port, connect_ms);
             chiron_trace("http: connect timed out (%s:%d)\n",
                 chiron_conf.host, chiron_conf.port);
+            backend_failed("nothing listening -- is it running?");
             ws.closesocket(sock);
             return false;
         }
@@ -1332,6 +1445,7 @@ static bool http_generate(const char* prompt, char* out, size_t out_len,
 
     chiron_trace("http: sending %d bytes\n", req_len);
     if (ws.send(sock, req, req_len, 0) != req_len) {
+        backend_failed("the connection dropped mid-request");
         ws.closesocket(sock);
         return false;
     }
@@ -1353,18 +1467,27 @@ static bool http_generate(const char* prompt, char* out, size_t out_len,
     resp[total > 0 ? total : 0] = '\0';
     if (total <= 0) {
         ch_log("http: empty response\n");
+        backend_failed("no answer within the timeout");
         return false;
     }
 
     const char* hdr_end = strstr(resp, "\r\n\r\n");
     if (!hdr_end) {
+        backend_failed("the reply was not HTTP");
         return false;
     }
     if (!strstr(resp, " 200 ")) {
         ch_log("http: non-200 response: %.80s\n", resp);
+        backend_failed("the server refused the request");
         return false;
     }
-    return json_get_text(hdr_end + 4, reply_key, out, out_len);
+    if (!json_get_text(hdr_end + 4, reply_key, out, out_len)) {
+        // Answered, and had nothing in it. Usually the wrong backend= for the
+        // server that is actually listening: the key we look for is not there.
+        backend_failed("answered, but with no text");
+        return false;
+    }
+    return true;
 }
 
 // ── prompt construction (port of buildDiplomacyPrompt) ─────────────────────
@@ -1572,6 +1695,35 @@ static void build_prompt(const Personality* p, const char* prose,
     char dossier[1024];
     build_dossier(speaker_faction, listener_faction, dossier, sizeof(dossier));
 
+    /*
+    The liar's rule, and only for a leader who has one.
+
+    It sits with the other rules rather than at the close, deliberately. The end
+    of the prompt is reserved for the two instructions that must survive
+    everything -- the values that have to appear verbatim, and the cue to speak
+    -- and the mandatory-value reminder was measured into that slot (9/12 kept,
+    then 11/12 once it went last). Putting a licence to misstate things after it
+    would be arguing with the one line that has to land.
+
+    The wording matters more than the placement. "Lie" on its own produced
+    nonsense: a leader who claims a war that is not happening breaks the
+    dossier, and the player has no way to weigh a claim about nothing. What
+    works is a bounded lie -- overstate your position, understate your need --
+    because it is a claim about something the player can actually check against
+    the map, which is the only kind of deception that is a game rather than
+    noise.
+    */
+    const char* deception_line = "";
+    if (p->deception) {
+        static char deception_buf[512];
+        snprintf(deception_buf, sizeof(deception_buf),
+            "- %s Never misstate what is on the table: the offer, the "
+            "technology and the numbers in the message above are exact, and "
+            "only your account of yourself is yours to shade.\n",
+            p->deception);
+        deception_line = deception_buf;
+    }
+
     snprintf(out, out_len,
 /*
 Every byte here is paid on every popup, and the game is blocked the whole time.
@@ -1632,6 +1784,7 @@ back to you.
 "already saying; never list them.\n"
 "- Output the message itself and nothing else: no preamble, no notes, no "
 "alternatives, no lists.\n"
+"%s"
 "\n"
 "%s"
 /*
@@ -1647,6 +1800,7 @@ names.
         dossier,
         variation_counter(),
         prose,
+        deception_line,
         must_line);
 }
 
@@ -3130,6 +3284,151 @@ round trip.
     ch_log("[news] dispatch, %d lines\n", count);
     popp("modmenu", "CHIRONNEWS", 0, 0, 0);
     parse_state_restore(&saved);
+}
+
+// ── the mod's own menu ─────────────────────────────────────────────────────
+
+/*
+Alt+M. Says whether the mod is actually working, and lets the switches be
+thrown without a restart.
+
+The reason this earns its place is the first line of it. Every failure path in
+this file falls back to the game's own text -- deliberately, because a dialogue
+box coming up empty would be worse than a canned line. The consequence is that
+a broken install and a working one look the same from the seat: vanilla
+dialogue is both "the bridge is down" and "the mod is not installed", and there
+is nothing on screen that separates them. The player's diagnosis is a log file
+they have no reason to know exists. A status line turns the mod's best property
+into something visible.
+
+The toggles are the session's, not the file's. Flipping one here does not write
+chiron.ini, because a menu that silently edits a config the player also hand-
+edits is a good way to lose their comments; chiron.ini stays the thing that
+decides how the game starts, and this decides how it is behaving right now.
+*/
+static void menu_status(char* line1, size_t len1, char* line2, size_t len2) {
+    snprintf(line1, len1, "Backend: %s at %s:%d.",
+        chiron_conf.backend, chiron_conf.host, chiron_conf.port);
+
+    if (!chiron_conf.enabled) {
+        strcpy_n(line2, len2,
+            "Generated text is off. Every line is the game's own.");
+    } else if (!backend.ever) {
+        strcpy_n(line2, len2,
+            "Not called yet. Nothing has needed generating this session.");
+    } else if (backend.last_ok) {
+        snprintf(line2, len2, "Working. Last reply %d.%ds, %d call%s, %d failed.",
+            (int)(backend.last_ms / 1000), (int)((backend.last_ms % 1000) / 100),
+            backend.calls, backend.calls == 1 ? "" : "s", backend.failures);
+    } else {
+        snprintf(line2, len2, "DOWN -- %s. Showing the game's own text.",
+            backend.reason);
+    }
+}
+
+/*
+Ask the backend for one word and report what came back.
+
+The reply is shown rather than just its success, because the failure this
+catches most often is not a dead server but the WRONG one: point `backend=` at
+a llama.cpp when ollama is what is listening and the request succeeds, the
+parse finds no key it recognises, and every dialogue silently goes vanilla. A
+visible "ready" proves the whole path end to end -- socket, request shape,
+reply key -- in a way that a green light cannot.
+*/
+static void menu_test_backend() {
+    char reply[512];
+    bool ok = http_generate("Reply with one word: ready\n", reply, sizeof(reply), 8);
+
+    char msg[256];
+    if (!ok) {
+        snprintf(msg, sizeof(msg), "No answer: %s", backend.reason);
+    } else {
+        strip_preamble(reply);
+        /*
+        Flatten before it is handed to parse_says. A '$' would be read as a
+        substitution on its way to the screen and render as some other slot's
+        value -- the same reason generated dialogue is scrubbed of tokens.
+        */
+        char flat[96];
+        size_t j = 0;
+        for (const char* p = reply; *p && j + 1 < sizeof(flat); p++) {
+            if (*p == '$') {
+                continue;
+            }
+            flat[j++] = (*p == '\n' || *p == '\r' || *p == '\t') ? ' ' : *p;
+        }
+        flat[j] = '\0';
+        snprintf(msg, sizeof(msg), "Answered in %d.%ds: %s",
+            (int)(backend.last_ms / 1000), (int)((backend.last_ms % 1000) / 100),
+            flat);
+    }
+    ch_log("[menu] backend test: %s\n", msg);
+    chiron_notice("Chiron Rising", msg);
+}
+
+void chiron_show_menu() {
+    chiron_ensure_init();
+
+    /*
+    The dispatch is launched AFTER the menu closes, not from inside the loop.
+    It shows a popup of its own, and opening one of ours while ours is still up
+    is the one arrangement here that has no precedent elsewhere in the file --
+    the probe confrontation is careful to restore the parse state before it
+    shows its second box for the same reason.
+    */
+    bool dispatch = false;
+
+    syn_parse_state_t saved;
+    parse_state_save(&saved);
+
+    for (;;) {
+        char line1[128], line2[192];
+        menu_status(line1, sizeof(line1), line2, sizeof(line2));
+
+        char t_dialogue[64], t_names[64], t_probe[64];
+        snprintf(t_dialogue, sizeof(t_dialogue), "Generated dialogue: %s.",
+            chiron_conf.enabled ? "on" : "off");
+        snprintf(t_names, sizeof(t_names), "Base names from faction culture: %s.",
+            chiron_conf.base_names ? "on" : "off");
+        snprintf(t_probe, sizeof(t_probe), "Object to probe teams: %s.",
+            chiron_conf.probe_protests ? "on" : "off");
+
+        parse_says(1, line1, -1, -1);
+        parse_says(2, line2, -1, -1);
+        parse_says(3, "Planetnet dispatch.", -1, -1);
+        parse_says(4, "Test the connection now.", -1, -1);
+        parse_says(5, t_dialogue, -1, -1);
+        parse_says(6, t_names, -1, -1);
+        parse_says(7, t_probe, -1, -1);
+
+        int choice = X_pop("CHIRONMENU", 0);
+        if (choice == 1) {
+            dispatch = true;
+            break;
+        } else if (choice == 2) {
+            menu_test_backend();
+        } else if (choice == 3) {
+            chiron_conf.enabled = !chiron_conf.enabled;
+            ch_log("[menu] generated dialogue %s\n",
+                chiron_conf.enabled ? "on" : "off");
+        } else if (choice == 4) {
+            chiron_conf.base_names = !chiron_conf.base_names;
+            ch_log("[menu] culture base names %s\n",
+                chiron_conf.base_names ? "on" : "off");
+        } else if (choice == 5) {
+            chiron_conf.probe_protests = !chiron_conf.probe_protests;
+            ch_log("[menu] probe protests %s\n",
+                chiron_conf.probe_protests ? "on" : "off");
+        } else {
+            break;  // Close, or the box dismissed some other way.
+        }
+    }
+
+    parse_state_restore(&saved);
+    if (dispatch) {
+        chiron_show_news();
+    }
 }
 
 static bool chiron_ready = false;

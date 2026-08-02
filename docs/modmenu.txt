@@ -143,6 +143,19 @@ $MSG1
 Say nothing.
 Demand that they call off their probe teams.
 
+#CHIRONMENU
+#xs 440
+#caption Chiron Rising
+$MSG1
+$MSG2
+
+Close.
+$MSG3
+$MSG4
+$MSG5
+$MSG6
+$MSG7
+
 #CHIRONNEWS
 #xs 440
 #caption $MSG0
