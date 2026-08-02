@@ -143,6 +143,16 @@ $MSG1
 Say nothing.
 Demand that they call off their probe teams.
 
+#CHIRONENEMYPROBE
+#xs 440
+#caption Operations Director
+We have detected a $<M1:$FACTIONADJ0> $PROBETEAM1, $TITLE2. Your instructions?
+
+Leave them unmolested.
+Interrogate them, then return them unharmed.
+Eliminate them!
+Return them, and put their leader on the commlink.
+
 #CHIRONRAISE
 #xs 440
 #caption $MSG0

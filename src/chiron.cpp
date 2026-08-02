@@ -2935,6 +2935,41 @@ bool chiron_confirm_break_word(int breaker, int tgt) {
 }
 
 /*
+Confront them over a probe team you caught in the act. Returns true if they
+agreed to stop.
+
+The counters this feature otherwise watches only move on a COMPLETED operation
+(probe.cpp:1233, inside `case PRB_PROCURE_RESEARCH_DATA`), so intercepting a
+probe team before it acts leaves nothing to detect -- which is the case a player
+is most likely to think ought to open the conversation, because it is the one
+where they have the proof in hand. veh_action.cpp calls this from the capture
+path, where there is no theft to diff and the evidence is the unit itself.
+
+No vendetta check here: the interception path only runs under TRUCE or TREATY.
+*/
+bool chiron_probe_confront(int speaker, int listener) {
+    chiron_ensure_init();
+    if (!chiron_conf.enabled || !chiron_conf.probe_protests
+        || !find_personality(speaker)) {
+        return false;
+    }
+    return run_protest(speaker, listener);
+}
+
+/*
+Should the capture popup carry Chiron's fourth option?
+
+Split out so veh_action.cpp can choose the block without reaching into
+chiron_conf, and so the answer is the same one chiron_probe_confront() will act
+on -- an option that leads nowhere is worse than no option.
+*/
+bool chiron_can_confront(int speaker) {
+    chiron_ensure_init();
+    return chiron_conf.enabled && chiron_conf.probe_protests
+        && find_personality(speaker) != NULL;
+}
+
+/*
 Offer to raise their probe teams with them, at a moment of the player's choosing.
 
 The turn-start popup is the only other way in, and it is a one-shot: say nothing

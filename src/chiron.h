@@ -143,6 +143,19 @@ double-cross counters record it. Read by the probe gate in veh_action.cpp.
 bool chiron_confirm_break_word(int breaker, int tgt);
 
 /*
+Confront a faction over a probe team caught in the act, from the interception
+popup in veh_action.cpp. Returns true if they agreed to call their teams off.
+
+The theft counters only move on a COMPLETED operation, so a probe team stopped
+at the border leaves nothing for chiron_check_thefts to diff -- yet that is
+exactly when the player holds both the proof and the leverage.
+*/
+bool chiron_probe_confront(int speaker, int listener);
+
+// Whether that confrontation is available, so the popup only offers what works.
+bool chiron_can_confront(int speaker);
+
+/*
 Is there an unresolved probe grievance the player could raise with this faction?
 True while they have robbed us and the matter has been neither conceded nor
 refused within the warning window.

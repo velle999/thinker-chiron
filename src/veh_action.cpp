@@ -2391,18 +2391,44 @@ MOV_SPOT:
                     *PluralDefault = 0;
                     *GenderDefault = MFactions[veh_fc_id].is_leader_female;
                     parse_says(2, MFactions[veh_fc_id].title_leader, -1, -1);
+                    /*
+                    Chiron Rising: a fourth option, "return them and put their
+                    leader on the commlink".
+
+                    This is the moment the protest feature was missing. Its
+                    detector diffs diplo_stolen_techs, which probe.cpp only
+                    increments on a COMPLETED operation, so a probe team stopped
+                    at the border is invisible to it -- and that is precisely
+                    when the player holds the proof and the leverage. Without
+                    this the choice here is shrug, hand them back, or start a
+                    war over it, which is the same bind the feature exists to
+                    undo, one step earlier in the sequence.
+
+                    #CHIRONENEMYPROBE lives in modmenu.txt and keeps options
+                    0-2 identical to the vanilla block, so every path below is
+                    unchanged and index 3 is the only new outcome. Thinker
+                    dispatches this popup itself -- popp returns the index and
+                    the code below switches on it -- so unlike #DIPLOMENU there
+                    is no engine jump table to outgrow. Falls back to the stock
+                    block whenever the confrontation is unavailable, rather than
+                    offering an option that leads nowhere.
+                    */
+                    bool can_warn = is_human(veh_fc_id)
+                        && chiron_can_confront(tgt_fc_id);
+                    const char* probe_file = can_warn ? "modmenu" : ScriptFile;
+                    const char* probe_label = can_warn ? "CHIRONENEMYPROBE" : "ENEMYPROBE";
                     int choice;
                     if (!is_human(veh_fc_id)) {
                         choice = 1;
                     } else if (!MFactions[tgt_fc_id].is_alien()) {
-                        choice = popp(ScriptFile, "ENEMYPROBE", 0, "capture_sm.pcx", 0);
+                        choice = popp(probe_file, probe_label, 0, "capture_sm.pcx", 0);
                     } else {
-                        choice = popp(ScriptFile, "ENEMYPROBE", 0, "al_cap_sm.pcx", 0);
+                        choice = popp(probe_file, probe_label, 0, "al_cap_sm.pcx", 0);
                     }
                     if (!choice) {
                         goto MOV_END;
                     }
-                    if (choice == 1) {
+                    if (choice == 1 || choice == 3) {
                         if (veh_fc_id == MapWin->cOwner || tgt_fc_id == MapWin->cOwner) {
                             Console_focus(MapWin, veh_x, veh_y, veh_fc_id);
                             stack_veh(veh_id, 1);
@@ -2434,6 +2460,17 @@ MOV_SPOT:
                             *GenderDefault = MFactions[veh_fc_id].is_leader_female;
                             parse_says(1, MFactions[veh_fc_id].title_leader, -1, -1);
                             NetMsg_pop(NetMsg, "GOTYOURPROBE", 5000, 0, 0);
+                        }
+                        /*
+                        After the return is reported, not before: the
+                        confrontation opens its own popups and the parse slots
+                        above belong to GOTYOURPROBE. run_protest saves and
+                        restores them, but the order still has to read as
+                        "they were handed back, then their leader answered for
+                        it".
+                        */
+                        if (choice == 3) {
+                            chiron_probe_confront(tgt_fc_id, veh_fc_id);
                         }
                         goto MOV_END;
                     }
